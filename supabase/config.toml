@@ -1,0 +1,36 @@
+# supabase/config.toml
+project_id = "flowsync-local"
+
+[api]
+port = 54321
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+major_version = 15
+
+[db.pooler]
+enabled = false
+port = 54329
+
+[studio]
+port = 54323
+
+[edge_runtime]
+enabled = true
+#port = 54324
+
+#[edge_runtime.inspector]
+#port = 8083
+
+[auth]
+#port = 54327
+site_url = "http://localhost:3000"
+additional_redirect_urls = ["https://localhost:3000"]
+jwt_expiry = 3600
+enable_signup = true
+
+[functions.ai-orchestrator]
+verify_jwt = true
