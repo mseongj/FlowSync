@@ -1,0 +1,138 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+import '../bloc/nlp_input_bloc.dart';
+import '../bloc/nlp_input_event.dart';
+import '../bloc/nlp_input_state.dart';
+import 'chat_history_list.dart';
+import 'event_preview_card.dart';
+
+class NlpBottomSheet extends StatefulWidget {
+  const NlpBottomSheet({Key? key}) : super(key: key);
+
+  @override
+  State<NlpBottomSheet> createState() => _NlpBottomSheetState();
+}
+
+class _NlpBottomSheetState extends State<NlpBottomSheet> with WidgetsBindingObserver {
+  final TextEditingController _textController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    // AppLifecycleObserver hook is handled by the parent or Bloc directly
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _textController.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
+      // Zero-Knowledge Security: Wipe ephemeral tokens when backgrounded
+      context.read<NlpInputBloc>().add(NlpMemoryZeroed());
+      Navigator.of(context).pop(); // Close the sheet
+    }
+  }
+
+  void _sendMessage(BuildContext context) {
+    final text = _textController.text.trim();
+    if (text.isNotEmpty) {
+      context.read<NlpInputBloc>().add(NlpMessageSent(text));
+      _textController.clear();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: MediaQuery.of(context).size.height * 0.6, // 60% height
+      padding: const EdgeInsets.only(top: 16, left: 8, right: 8, bottom: 16),
+      child: Column(
+        children: [
+          Container(
+            width: 40,
+            height: 4,
+            decoration: BoxDecoration(
+              color: Colors.grey[400],
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Expanded(
+            child: BlocConsumer<NlpInputBloc, NlpInputState>(
+              listener: (context, state) {
+                if (state is NlpError && state.isCircuitOpen) {
+                  // Graceful Degradation to Manual UI
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('AI Assistant is resting. Opening manual form.')),
+                  );
+                  Navigator.of(context).pop();
+                  // TODO: Navigate to ManualEventFormScreen
+                }
+              },
+              builder: (context, state) {
+                if (state is NlpInitial) {
+                  return ChatHistoryList(messages: state.chatHistory);
+                } else if (state is NlpProcessing) {
+                  return ChatHistoryList(messages: state.chatHistory);
+                } else if (state is NlpResponseReady) {
+                  return Column(
+                    children: [
+                      Expanded(child: ChatHistoryList(messages: state.chatHistory)),
+                      if (state.aiResponse.intent == 'CREATE_EVENT')
+                        EventPreviewCard(
+                          aiResponse: state.aiResponse,
+                          onConfirm: () {
+                            context.read<NlpInputBloc>().add(NlpEventConfirmed());
+                            Navigator.of(context).pop();
+                          },
+                          onEdit: () {
+                            // Open manual edit
+                          },
+                        ),
+                    ],
+                  );
+                } else if (state is NlpError) {
+                  return Column(
+                    children: [
+                      Expanded(child: ChatHistoryList(messages: state.chatHistory)),
+                      Padding(
+                        padding: const EdgeInsets.all(8.0),
+                        child: Text(state.message, style: const TextStyle(color: Colors.red)),
+                      ),
+                    ],
+                  );
+                }
+                return const SizedBox();
+              },
+            ),
+          ),
+          const Divider(),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _textController,
+                  decoration: const InputDecoration(
+                    hintText: 'Schedule a meeting...',
+                    border: InputBorder.none,
+                  ),
+                  onSubmitted: (_) => _sendMessage(context),
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.send, color: Colors.blue),
+                onPressed: () => _sendMessage(context),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
