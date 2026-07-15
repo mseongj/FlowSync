@@ -90,7 +90,7 @@ class AiOrchestrationService {
       );
 
       if (response.status >= 400) {
-        throw Exception('Edge function error: \${response.status}');
+        throw Exception('Edge function error: ${response.status}');
       }
 
       final data = response.data as Map<String, dynamic>;
@@ -101,7 +101,7 @@ class AiOrchestrationService {
     } catch (e) {
       _recordFailure();
       // If we failed, re-throw to trigger graceful degradation to manual UI
-      throw CircuitOpenException('API Error: \${e.toString()}');
+      throw CircuitOpenException('API Error: ${e.toString()}');
     }
   }
 }

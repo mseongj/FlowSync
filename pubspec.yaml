@@ -24,19 +24,29 @@ dependencies:
   supabase_flutter: ^2.5.4
 
   # Configuration & Secrets
-  envied: ^0.5.4.3
+  envied: ^1.1.0
   
   # Offline Storage
   hive: ^2.2.3
   hive_flutter: ^1.1.0
+
+  # Security
+  flutter_secure_storage: ^9.2.4
+
+  # Utilities
+  uuid: ^4.5.1
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   very_good_analysis: ^6.0.0
   build_runner: ^2.4.9
-  injectable_generator: ^2.6.1
-  envied_generator: ^0.5.4.3
+  injectable_generator: ^2.10.0
+  envied_generator: ^1.1.0
+
+  # Testing
+  mocktail: ^1.0.4
+  bloc_test: ^9.1.7
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

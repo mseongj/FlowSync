@@ -48,7 +48,7 @@ serve(async (req) => {
     const isComplex = /(reschedule|conflict|find time|overlap|\[PERSON_\d+\](.*)\[PERSON_\d+\])/i.test(text)
     const modelId = isComplex ? 'gemini-2.5-flash' : 'gemini-2.5-flash-lite'
     
-    console.log(`Routing to \${modelId} based on heuristics.`)
+    console.log(`Routing to ${modelId} based on heuristics.`)
 
     const ai = new GoogleGenAI({ apiKey: Deno.env.get('GEMINI_API_KEY') })
 
@@ -57,7 +57,7 @@ serve(async (req) => {
 
     const response = await ai.models.generateContent({
         model: modelId,
-        contents: `You are an AI calendar assistant. Parse the following text into a scheduling intent. Do not output anything except valid JSON. Preserve exact tokens like [PERSON_1] in your response. Text: "\${text}"`,
+        contents: `You are an AI calendar assistant. Parse the following text into a scheduling intent. Do not output anything except valid JSON. Preserve exact tokens like [PERSON_1] in your response. Text: "${text}"`,
         config: {
             responseMimeType: "application/json",
             responseSchema: {

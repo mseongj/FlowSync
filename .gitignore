@@ -11,6 +11,7 @@
 .svn/
 .swiftpm/
 migrate_working_dir/
+Thumbs.db
 
 # IntelliJ related
 *.iml
@@ -18,9 +19,7 @@ migrate_working_dir/
 *.iws
 .idea/
 
-# The .vscode folder contains launch configuration and tasks you configure in
-# VS Code which you may wish to be included in version control, so this line
-# is commented out by default.
+# VS Code
 .vscode/
 
 # Flutter/Dart/Pub related
@@ -34,6 +33,11 @@ migrate_working_dir/
 /build/
 /coverage/
 **/.symlinks/
+
+# Generated code (build_runner, envied, injectable, freezed)
+*.g.dart
+*.freezed.dart
+*.config.dart
 
 # Symbolication related
 app.*.symbols
@@ -53,12 +57,12 @@ app.*.map.json
 # Secrets & Environment Variables
 .env
 .env.*
-*.env
+!.env.example
 
 # Supabase Local Infrastructure
 .supabase/
 
-# AI-DLC & Agent Rules (Do NOT ignore aidlc-docs/)
+# AI-DLC & Agent Rules
 .aidlc/
-aidlc-docs
 .agent/
+aidlc-docs/

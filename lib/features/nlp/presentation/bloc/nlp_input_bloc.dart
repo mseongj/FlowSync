@@ -79,7 +79,7 @@ class NlpInputBloc extends Bloc<NlpInputEvent, NlpInputState> {
     // Actively overwrite memory with null bytes to prevent memory dump leakage
     final keys = _ephemeralTokenMap.keys.toList();
     for (var key in keys) {
-      _ephemeralTokenMap[key] = '\\x00\\x00\\x00'; // Null byte overwrite
+      _ephemeralTokenMap[key] = '\x00\x00\x00'; // Null byte overwrite
     }
     _ephemeralTokenMap.clear();
     
