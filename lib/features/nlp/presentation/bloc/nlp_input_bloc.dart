@@ -1,13 +1,19 @@
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:uuid/uuid.dart';
+import 'package:injectable/injectable.dart';
 import 'nlp_input_event.dart';
 import 'nlp_input_state.dart';
 import '../../data/services/ai_orchestration_service.dart';
 import '../../domain/entities/chat_message.dart';
 import '../../domain/entities/nlp_command.dart';
+import '../../../schedule/domain/entities/calendar_event.dart';
+import '../../../../core/database/local_database_service.dart';
+import '../../../../core/background/sync_queue_manager.dart';
 
+@injectable
 class NlpInputBloc extends Bloc<NlpInputEvent, NlpInputState> {
   final AiOrchestrationService _aiService;
+  final LocalDatabaseService _localDb;
   final _uuid = const Uuid();
   
   // Ephemeral Token Map (Zero-Knowledge Privacy)
@@ -15,9 +21,32 @@ class NlpInputBloc extends Bloc<NlpInputEvent, NlpInputState> {
   
   List<ChatMessage> _chatHistory = [];
 
-  NlpInputBloc(this._aiService) : super(NlpInitial()) {
+  NlpInputBloc(this._aiService, this._localDb) : super(NlpInitial()) {
     on<NlpMessageSent>(_onMessageSent);
+    on<NlpEventConfirmed>(_onEventConfirmed);
     on<NlpMemoryZeroed>(_onMemoryZeroed);
+  }
+
+  Future<void> _onEventConfirmed(NlpEventConfirmed event, Emitter<NlpInputState> emit) async {
+    // Save to local database
+    await _localDb.saveEvent(event.event);
+    
+    // Add to sync queue since it's offline created (or pending sync)
+    if (event.event.isOfflineCreated) {
+      await OfflineSyncQueueManager().enqueueSyncTask(event.event.id);
+    }
+    
+    // Clear ephemeral map and add system message
+    _ephemeralTokenMap.clear();
+    
+    _chatHistory.add(ChatMessage(
+      id: _uuid.v4(),
+      text: 'Event "${event.event.title}" confirmed and saved.',
+      isUser: false,
+      timestamp: DateTime.now(),
+    ));
+    
+    emit(NlpInitial(chatHistory: _chatHistory));
   }
 
   Future<void> _onMessageSent(NlpMessageSent event, Emitter<NlpInputState> emit) async {

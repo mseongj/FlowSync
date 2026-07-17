@@ -17,12 +17,12 @@ class FamilyKeyStore {
 
   factory FamilyKeyStore.fromJson(Map<String, dynamic> json) {
     return FamilyKeyStore(
-      id: json['id'],
-      familyId: json['family_id'],
-      memberId: json['member_id'],
-      encryptedPayload: json['encrypted_payload'],
-      createdAt: DateTime.parse(json['created_at']),
-      updatedAt: DateTime.parse(json['updated_at']),
+      id: json['id'] as String,
+      familyId: json['family_id'] as String,
+      memberId: json['member_id'] as String,
+      encryptedPayload: json['encrypted_payload'] as String,
+      createdAt: DateTime.parse(json['created_at'] as String),
+      updatedAt: DateTime.parse(json['updated_at'] as String),
     );
   }
 }

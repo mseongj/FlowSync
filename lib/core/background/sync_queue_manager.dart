@@ -45,4 +45,15 @@ class OfflineSyncQueueManager {
       backoffPolicyDelay: const Duration(minutes: 5), // Base delay for exponential backoff
     );
   }
+
+  Future<void> enqueueSyncTask(String eventId) async {
+    await Workmanager().registerOneOffTask(
+      "sync_$eventId",
+      syncTaskName,
+      inputData: {'eventId': eventId},
+      constraints: Constraints(networkType: NetworkType.connected),
+      backoffPolicy: BackoffPolicy.exponential,
+      backoffPolicyDelay: const Duration(minutes: 5),
+    );
+  }
 }

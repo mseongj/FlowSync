@@ -1,4 +1,5 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:injectable/injectable.dart';
 import '../../domain/entities/nlp_command.dart';
 import '../../domain/entities/ai_scheduling_response.dart';
 
@@ -9,6 +10,7 @@ class CircuitOpenException implements Exception {
 
 enum CircuitState { closed, open, halfOpen }
 
+@lazySingleton
 class AiOrchestrationService {
   final SupabaseClient _supabase;
   

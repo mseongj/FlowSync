@@ -1,4 +1,8 @@
-enum EventVisibility { public, private, secret }
+enum EventVisibility {
+  public,
+  private,
+  secret
+}
 
 class CalendarEvent {
   final String id;

@@ -8,11 +8,16 @@ import 'package:flow_sync/features/nlp/presentation/bloc/nlp_input_bloc.dart';
 import 'package:flow_sync/features/nlp/presentation/bloc/nlp_input_event.dart';
 import 'package:flow_sync/features/nlp/presentation/bloc/nlp_input_state.dart';
 
+import 'package:flow_sync/core/database/local_database_service.dart';
+
 class MockAiOrchestrationService extends Mock
     implements AiOrchestrationService {}
 
+class MockLocalDatabaseService extends Mock implements LocalDatabaseService {}
+
 void main() {
   late MockAiOrchestrationService mockService;
+  late MockLocalDatabaseService mockDb;
 
   final testCommand = NlpCommand(
     rawText: 'Meeting with Alice',
@@ -30,6 +35,7 @@ void main() {
 
   setUp(() {
     mockService = MockAiOrchestrationService();
+    mockDb = MockLocalDatabaseService();
   });
 
   setUpAll(() {
@@ -51,7 +57,7 @@ void main() {
         when(
           () => mockService.processCommand(any()),
         ).thenAnswer((_) async => testResponse);
-        return NlpInputBloc(mockService);
+        return NlpInputBloc(mockService, mockDb);
       },
       act: (bloc) => bloc.add(NlpMessageSent('Meeting with Alice')),
       expect: () => [
@@ -72,7 +78,7 @@ void main() {
         when(
           () => mockService.processCommand(any()),
         ).thenThrow(CircuitOpenException('Circuit is open'));
-        return NlpInputBloc(mockService);
+        return NlpInputBloc(mockService, mockDb);
       },
       act: (bloc) => bloc.add(NlpMessageSent('Meeting with Alice')),
       expect: () => [
@@ -87,7 +93,7 @@ void main() {
 
     blocTest<NlpInputBloc, NlpInputState>(
       'emits [NlpInitial] with empty chat on NlpMemoryZeroed',
-      build: () => NlpInputBloc(mockService),
+      build: () => NlpInputBloc(mockService, mockDb),
       act: (bloc) => bloc.add(NlpMemoryZeroed()),
       expect: () => [
         isA<NlpInitial>().having(
@@ -105,7 +111,7 @@ void main() {
         when(
           () => mockService.processCommand(any()),
         ).thenAnswer((_) async => testResponse);
-        return NlpInputBloc(mockService);
+        return NlpInputBloc(mockService, mockDb);
       },
       act: (bloc) async {
         bloc.add(NlpMessageSent('First message'));
@@ -132,7 +138,7 @@ void main() {
         when(
           () => mockService.processCommand(any()),
         ).thenAnswer((_) async => testResponse);
-        return NlpInputBloc(mockService);
+        return NlpInputBloc(mockService, mockDb);
       },
       act: (bloc) => bloc.add(NlpMessageSent('Hello')),
       expect: () => [
@@ -157,7 +163,7 @@ void main() {
         when(
           () => mockService.processCommand(any()),
         ).thenThrow(Exception('Random failure'));
-        return NlpInputBloc(mockService);
+        return NlpInputBloc(mockService, mockDb);
       },
       act: (bloc) => bloc.add(NlpMessageSent('Hello')),
       expect: () => [

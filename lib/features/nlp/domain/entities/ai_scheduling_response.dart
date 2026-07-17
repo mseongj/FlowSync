@@ -22,9 +22,15 @@ class AiSchedulingResponse {
       intent: json['intent'] as String? ?? 'UNKNOWN',
       eventTitleTokenized: json['eventTitleTokenized'] as String?,
       locationTokenized: json['locationTokenized'] as String?,
-      startTime: json['startTime'] != null ? DateTime.parse(json['startTime']) : null,
-      endTime: json['endTime'] != null ? DateTime.parse(json['endTime']) : null,
-      participantsTokenized: List<String>.from(json['participantsTokenized'] ?? []),
+      startTime: json['startTime'] != null
+          ? DateTime.parse(json['startTime'] as String)
+          : null,
+      endTime: json['endTime'] != null
+          ? DateTime.parse(json['endTime'] as String)
+          : null,
+      participantsTokenized: List<String>.from(
+        (json['participantsTokenized'] as Iterable<dynamic>?) ?? [],
+      ),
       aiReplyMessage: json['aiReplyMessage'] as String? ?? '',
     );
   }

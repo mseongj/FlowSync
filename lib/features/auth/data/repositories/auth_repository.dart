@@ -70,9 +70,9 @@ class AuthRepository implements IAuthRepository {
       email: user.email ?? '',
       dob: dobStr != null ? DateTime.parse(dobStr) : DateTime.now(),
       parentConsentVerifiedAt: metadata['parent_consent_verified_at'] != null 
-          ? DateTime.parse(metadata['parent_consent_verified_at']) 
+          ? DateTime.parse(metadata['parent_consent_verified_at'] as String) 
           : null,
-      familyId: metadata['family_id'],
+      familyId: metadata['family_id'] as String?,
     );
   }
 }
