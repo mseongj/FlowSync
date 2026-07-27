@@ -14,6 +14,7 @@ import '../../../../core/background/sync_queue_manager.dart';
 class NlpInputBloc extends Bloc<NlpInputEvent, NlpInputState> {
   final AiOrchestrationService _aiService;
   final LocalDatabaseService _localDb;
+  final OfflineSyncQueueManager _syncManager;
   final _uuid = const Uuid();
   
   // Ephemeral Token Map (Zero-Knowledge Privacy)
@@ -21,7 +22,7 @@ class NlpInputBloc extends Bloc<NlpInputEvent, NlpInputState> {
   
   List<ChatMessage> _chatHistory = [];
 
-  NlpInputBloc(this._aiService, this._localDb) : super(NlpInitial()) {
+  NlpInputBloc(this._aiService, this._localDb, this._syncManager) : super(NlpInitial()) {
     on<NlpMessageSent>(_onMessageSent);
     on<NlpEventConfirmed>(_onEventConfirmed);
     on<NlpMemoryZeroed>(_onMemoryZeroed);
@@ -33,7 +34,7 @@ class NlpInputBloc extends Bloc<NlpInputEvent, NlpInputState> {
     
     // Add to sync queue since it's offline created (or pending sync)
     if (event.event.isOfflineCreated) {
-      await OfflineSyncQueueManager().enqueueSyncTask(event.event.id);
+      await _syncManager.enqueueSyncTask(event.event.id);
     }
     
     // Clear ephemeral map and add system message

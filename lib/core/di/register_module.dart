@@ -1,8 +1,9 @@
 import 'package:injectable/injectable.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 @module
 abstract class RegisterModule {
-  @lazySingleton
-  SupabaseClient get supabase => Supabase.instance.client;
+  // SupabaseClient is registered manually in main.dart after
+  // Supabase.initialize() completes successfully.
+  // Do NOT add a SupabaseClient getter here — it would crash
+  // because configureDependencies() runs before Supabase.initialize().
 }

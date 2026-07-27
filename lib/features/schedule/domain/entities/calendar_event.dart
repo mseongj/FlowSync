@@ -29,6 +29,25 @@ class CalendarEvent {
     this.isOfflineCreated = false,
   });
 
+  /// Reconstructs a [CalendarEvent] from a Supabase `calendar_events` row.
+  ///
+  /// Events coming from the server are considered already synced, so
+  /// [isOfflineCreated] defaults to `false`.
+  factory CalendarEvent.fromSupabaseJson(Map<String, dynamic> json) {
+    return CalendarEvent(
+      id: json['id'] as String,
+      familyId: json['family_id'] as String,
+      creatorId: json['creator_id'] as String,
+      title: json['title'] as String? ?? '',
+      description: json['description'] as String? ?? '',
+      location: json['location'] as String? ?? '',
+      startTime: DateTime.parse(json['start_time'] as String).toLocal(),
+      endTime: DateTime.parse(json['end_time'] as String).toLocal(),
+      visibility: _visibilityFromString(json['visibility'] as String?),
+      isOfflineCreated: false,
+    );
+  }
+
   CalendarEvent copyWith({
     String? id,
     String? familyId,
@@ -53,5 +72,37 @@ class CalendarEvent {
       visibility: visibility ?? this.visibility,
       isOfflineCreated: isOfflineCreated ?? this.isOfflineCreated,
     );
+  }
+
+  /// Serializes this event into the payload expected by the Supabase
+  /// `calendar_events` table.
+  ///
+  /// [isOfflineCreated] is intentionally omitted: it is a local-only sync
+  /// flag and is not stored remotely. Timestamps are written as UTC ISO-8601
+  /// strings for `timestamptz` columns.
+  Map<String, dynamic> toSupabaseJson() {
+    return <String, dynamic>{
+      'id': id,
+      'family_id': familyId,
+      'creator_id': creatorId,
+      'title': title,
+      'description': description,
+      'location': location,
+      'start_time': startTime.toUtc().toIso8601String(),
+      'end_time': endTime.toUtc().toIso8601String(),
+      'visibility': visibility.name,
+    };
+  }
+
+  static EventVisibility _visibilityFromString(String? value) {
+    switch (value) {
+      case 'private':
+        return EventVisibility.private;
+      case 'secret':
+        return EventVisibility.secret;
+      case 'public':
+      default:
+        return EventVisibility.public;
+    }
   }
 }

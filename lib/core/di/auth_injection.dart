@@ -17,5 +17,5 @@ void setupAuthInjection() {
   getIt.registerSingleton<CryptoWorkerManager>(CryptoWorkerManager());
 
   // Blocs
-  getIt.registerFactory(() => AuthBloc(getIt()));
+  getIt.registerLazySingleton(() => AuthBloc(getIt()));
 }

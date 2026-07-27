@@ -1,27 +1,24 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' hide AuthUser;
 
-import 'core/config/env.dart';
-import 'core/di/injection.dart';
-import 'core/di/auth_injection.dart';
-import 'core/database/local_database_service.dart';
-import 'core/background/sync_queue_manager.dart';
-import 'core/theme/cubit/theme_cubit.dart';
-import 'core/theme/app_theme.dart';
-import 'core/router/app_router.dart';
-import 'features/auth/presentation/bloc/auth_bloc.dart';
-import 'features/auth/domain/repositories/i_auth_repository.dart';
-import 'features/auth/domain/entities/auth_user.dart';
-import 'features/nlp/presentation/bloc/nlp_input_bloc.dart';
-import 'features/schedule/presentation/bloc/schedule_bloc.dart';
+import 'package:flow_sync/core/config/env.dart';
+import 'package:flow_sync/core/di/injection.dart';
+import 'package:flow_sync/core/di/auth_injection.dart';
+import 'package:flow_sync/core/database/local_database_service.dart';
+import 'package:flow_sync/core/background/sync_queue_manager.dart';
+import 'package:flow_sync/core/theme/cubit/theme_cubit.dart';
+import 'package:flow_sync/core/theme/app_theme.dart';
+import 'package:flow_sync/core/router/app_router.dart';
+import 'package:flow_sync/features/auth/presentation/bloc/auth_bloc.dart';
+import 'package:flow_sync/features/auth/domain/repositories/i_auth_repository.dart';
+import 'package:flow_sync/features/auth/domain/entities/auth_user.dart';
+import 'package:flow_sync/features/nlp/presentation/bloc/nlp_input_bloc.dart';
+import 'package:flow_sync/features/schedule/presentation/bloc/schedule_bloc.dart';
 
 void main() {
-  // 1. Flutter Binding
   WidgetsFlutterBinding.ensureInitialized();
-  
-  // 2. Run App Immediately to avoid ANR
   runApp(const AppInitializer());
 }
 
@@ -34,6 +31,7 @@ class AppInitializer extends StatefulWidget {
 
 class _AppInitializerState extends State<AppInitializer> {
   bool _isInitialized = false;
+  String? _initError;
 
   @override
   void initState() {
@@ -42,42 +40,54 @@ class _AppInitializerState extends State<AppInitializer> {
   }
 
   Future<void> _initializeApp() async {
-    // 3. DI Setup
-    configureDependencies();
-
-    // 4. Eagerly init Local DB
-    await getIt<LocalDatabaseService>().initialize();
-
-    // 5. Initialize Supabase Client
-    var supabaseReady = false;
     try {
-      await Supabase.initialize(
-        url: Env.supabaseUrl,
-        anonKey: Env.supabaseAnonKey,
-      );
-      supabaseReady = true;
-    } catch (e) {
-      debugPrint('⚠️ Supabase init failed (using placeholder .env?): $e');
-    }
+      await initializeDateFormatting('ko', null);
 
-    // 6. Register Auth services
-    if (supabaseReady) {
-      setupAuthInjection();
-    } else {
-      _registerFallbackAuth();
-    }
+      // 1. DI Setup (injectable-generated registrations)
+      configureDependencies();
 
-    // 7. Initialize Background Sync Worker
-    try {
-      await OfflineSyncQueueManager().initialize();
-    } catch (e) {
-      debugPrint('⚠️ Workmanager init failed: $e');
-    }
+      // 2. Local DB (Hive)
+      await getIt<LocalDatabaseService>().initialize();
 
-    if (mounted) {
-      setState(() {
-        _isInitialized = true;
-      });
+      // 3. Supabase
+      var supabaseReady = false;
+      try {
+        await Supabase.initialize(
+          url: Env.supabaseUrl,
+          publishableKey: Env.supabaseAnonKey,
+        );
+        supabaseReady = true;
+        // Register SupabaseClient manually AFTER successful init
+        getIt.registerLazySingleton<SupabaseClient>(
+          () => Supabase.instance.client,
+        );
+      } catch (e) {
+        debugPrint('⚠️ Supabase init failed: $e');
+      }
+
+      // 4. Auth services
+      if (supabaseReady) {
+        setupAuthInjection();
+      } else {
+        _registerFallbackAuth();
+      }
+
+      // 5. Background Sync Worker
+      try {
+        await getIt<OfflineSyncQueueManager>().initialize();
+      } catch (e) {
+        debugPrint('⚠️ Workmanager init failed: $e');
+      }
+    } catch (e, st) {
+      debugPrint('🚨 CRITICAL INIT ERROR: $e');
+      debugPrint('🚨 StackTrace: $st');
+      _initError = e.toString();
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isInitialized = true;
+        });
+      }
     }
   }
 
@@ -87,20 +97,35 @@ class _AppInitializerState extends State<AppInitializer> {
       return const MaterialApp(
         debugShowCheckedModeBanner: false,
         home: Scaffold(
+          body: Center(child: CircularProgressIndicator()),
+        ),
+      );
+    }
+
+    if (_initError != null) {
+      return MaterialApp(
+        debugShowCheckedModeBanner: false,
+        home: Scaffold(
           body: Center(
-            child: CircularProgressIndicator(),
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Text(
+                'Initialization failed:\n$_initError',
+                textAlign: TextAlign.center,
+              ),
+            ),
           ),
         ),
       );
     }
+
     return const FlowSyncApp();
   }
 }
 
 /// Registers a minimal AuthBloc when Supabase is not available
 void _registerFallbackAuth() {
-  // Provide a no-op AuthBloc that immediately emits Unauthenticated
-  getIt.registerFactory<AuthBloc>(
+  getIt.registerLazySingleton<AuthBloc>(
     () => _FallbackAuthBloc(),
   );
 }
@@ -136,21 +161,32 @@ class FlowSyncApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MultiBlocProvider(
-      providers: [
-        BlocProvider<ThemeCubit>(
-          create: (_) => getIt<ThemeCubit>(),
-        ),
-        BlocProvider<AuthBloc>(
-          create: (_) => getIt<AuthBloc>()..add(AppStarted()),
-        ),
+    // Build the list of providers dynamically based on what's available
+    final providers = <BlocProvider>[
+      BlocProvider<ThemeCubit>(
+        create: (_) => getIt<ThemeCubit>(),
+      ),
+      BlocProvider<AuthBloc>(
+        lazy: false,
+        create: (_) => getIt<AuthBloc>()..add(AppStarted()),
+      ),
+      BlocProvider<ScheduleBloc>(
+        create: (_) => getIt<ScheduleBloc>()..add(ScheduleStarted()),
+      ),
+    ];
+
+    // NlpInputBloc depends on SupabaseClient via AiOrchestrationService.
+    // Only provide it if SupabaseClient is registered.
+    if (getIt.isRegistered<SupabaseClient>()) {
+      providers.add(
         BlocProvider<NlpInputBloc>(
           create: (_) => getIt<NlpInputBloc>(),
         ),
-        BlocProvider<ScheduleBloc>(
-          create: (_) => getIt<ScheduleBloc>()..add(ScheduleStarted()),
-        ),
-      ],
+      );
+    }
+
+    return MultiBlocProvider(
+      providers: providers,
       child: BlocBuilder<ThemeCubit, ThemeState>(
         builder: (context, themeState) {
           return MaterialApp.router(
@@ -165,3 +201,4 @@ class FlowSyncApp extends StatelessWidget {
     );
   }
 }
+

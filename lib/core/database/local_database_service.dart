@@ -7,8 +7,12 @@ import '../../features/schedule/domain/entities/calendar_event.dart';
 class LocalDatabaseService {
   Future<void> initialize() async {
     await Hive.initFlutter();
-    Hive.registerAdapter(EventVisibilityAdapter());
-    Hive.registerAdapter(CalendarEventAdapter());
+    if (!Hive.isAdapterRegistered(0)) {
+      Hive.registerAdapter(EventVisibilityAdapter());
+    }
+    if (!Hive.isAdapterRegistered(1)) {
+      Hive.registerAdapter(CalendarEventAdapter());
+    }
     
     await Hive.openBox('calendar_events');
   }

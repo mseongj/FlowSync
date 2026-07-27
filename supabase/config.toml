@@ -31,6 +31,7 @@ site_url = "http://localhost:3000"
 additional_redirect_urls = ["https://localhost:3000"]
 jwt_expiry = 3600
 enable_signup = true
+enable_anonymous_sign_ins = true
 
-[functions.ai-orchestrator]
+[functions.nlp-agent-function]
 verify_jwt = true
