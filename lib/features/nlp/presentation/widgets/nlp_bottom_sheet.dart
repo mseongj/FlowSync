@@ -2,6 +2,7 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:go_router/go_router.dart';
 import 'package:uuid/uuid.dart';
 
 import 'package:flow_sync/features/nlp/presentation/bloc/nlp_input_bloc.dart';
@@ -246,7 +247,8 @@ class _NlpBottomSheetState extends State<NlpBottomSheet>
               Navigator.of(context).pop();
             },
             onEdit: () {
-              // TODO: Navigate to ManualEventFormScreen
+              Navigator.of(context).pop();
+              context.push('/event/edit', extra: state.aiResponse);
             },
           ),
         if (state is NlpError && !state.isCircuitOpen)

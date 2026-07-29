@@ -1,12 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:get_it/get_it.dart';
+import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 import 'package:table_calendar/table_calendar.dart';
 
 import 'package:flow_sync/features/nlp/presentation/bloc/nlp_input_bloc.dart';
 import 'package:flow_sync/features/nlp/presentation/widgets/nlp_bottom_sheet.dart';
+import 'package:flow_sync/features/schedule/domain/entities/calendar_event.dart';
 import 'package:flow_sync/features/schedule/presentation/bloc/schedule_bloc.dart';
+import 'package:flow_sync/features/schedule/presentation/widgets/event_detail_sheet.dart';
 
 class DashboardScreen extends StatelessWidget {
   const DashboardScreen({super.key});
@@ -30,8 +33,6 @@ class DashboardScreen extends StatelessWidget {
       return;
     }
 
-    // Use BlocProvider.value to pass the existing NlpInputBloc
-    // from the widget tree into the modal bottom sheet's new context.
     final nlpBloc = context.read<NlpInputBloc>();
 
     showModalBottomSheet<void>(
@@ -51,6 +52,11 @@ class DashboardScreen extends StatelessWidget {
       appBar: AppBar(
         title: const Text('FlowSync Dashboard'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.family_restroom_rounded),
+            tooltip: '가족 그룹',
+            onPressed: () => context.push('/family'),
+          ),
           IconButton(
             icon: const Icon(Icons.settings),
             onPressed: () {
@@ -90,28 +96,47 @@ class DashboardScreen extends StatelessWidget {
                     }).toList();
                   },
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 4),
                 Expanded(
                   child: state.selectedDateEvents.isEmpty
-                      ? const Center(
-                          child: Text('No events for this day.'),
+                      ? Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.event_available_rounded,
+                                size: 52,
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .onSurface
+                                    .withValues(alpha: 0.18),
+                              ),
+                              const SizedBox(height: 12),
+                              Text(
+                                '이 날에는 일정이 없어요',
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  color: Theme.of(context)
+                                      .colorScheme
+                                      .onSurface
+                                      .withValues(alpha: 0.38),
+                                ),
+                              ),
+                            ],
+                          ),
                         )
                       : ListView.builder(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 8,
+                          ),
                           itemCount: state.selectedDateEvents.length,
                           itemBuilder: (context, index) {
-                            final event =
-                                state.selectedDateEvents[index];
-                            final timeFormat = DateFormat('h:mm a');
-                            return ListTile(
-                              leading: const Icon(Icons.event),
-                              title: Text(event.title),
-                              subtitle: Text(
-                                '${timeFormat.format(event.startTime)}'
-                                ' - '
-                                '${timeFormat.format(event.endTime)}'
-                                '\n${event.location}',
-                              ),
-                              isThreeLine: true,
+                            final event = state.selectedDateEvents[index];
+                            return _EventCard(
+                              event: event,
+                              onTap: () =>
+                                  EventDetailSheet.show(context, event),
                             );
                           },
                         ),
@@ -125,10 +150,163 @@ class DashboardScreen extends StatelessWidget {
           }
         },
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _openAiChat(context),
-        icon: const Icon(Icons.auto_awesome),
-        label: const Text('AI Sync'),
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          FloatingActionButton.small(
+            heroTag: 'fab_new_event',
+            onPressed: () => context.push('/event/new'),
+            tooltip: '새 일정 추가',
+            child: const Icon(Icons.add),
+          ),
+          const SizedBox(height: 12),
+          FloatingActionButton.extended(
+            heroTag: 'fab_ai_sync',
+            onPressed: () => _openAiChat(context),
+            icon: const Icon(Icons.auto_awesome),
+            label: const Text('AI Sync'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Premium Event Card ─────────────────────────────────────────────────────
+
+class _EventCard extends StatelessWidget {
+  final CalendarEvent event;
+  final VoidCallback onTap;
+
+  const _EventCard({required this.event, required this.onTap});
+
+  Color _visibilityColor(ColorScheme cs) {
+    return switch (event.visibility) {
+      EventVisibility.public  => cs.primary,
+      EventVisibility.private => const Color(0xFFFF9800),
+      EventVisibility.secret  => const Color(0xFFE53935),
+    };
+  }
+
+  IconData _visibilityIcon() {
+    return switch (event.visibility) {
+      EventVisibility.public  => Icons.public_rounded,
+      EventVisibility.private => Icons.lock_outline_rounded,
+      EventVisibility.secret  => Icons.shield_rounded,
+    };
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final timeFormat = DateFormat('HH:mm', 'ko');
+    final accentColor = _visibilityColor(cs);
+    final isSecret = event.visibility == EventVisibility.secret;
+
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        decoration: BoxDecoration(
+          color: cs.surfaceContainerHighest.withValues(alpha: 0.55),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: accentColor.withValues(alpha: 0.2),
+          ),
+        ),
+        child: IntrinsicHeight(
+          child: Row(
+            children: [
+              // Left accent bar
+              Container(
+                width: 4,
+                decoration: BoxDecoration(
+                  color: accentColor,
+                  borderRadius: const BorderRadius.only(
+                    topLeft: Radius.circular(16),
+                    bottomLeft: Radius.circular(16),
+                  ),
+                ),
+              ),
+              // Content
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 12,
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            // Title row
+                            Row(
+                              children: [
+                                Icon(
+                                  _visibilityIcon(),
+                                  size: 14,
+                                  color:
+                                      accentColor.withValues(alpha: 0.7),
+                                ),
+                                const SizedBox(width: 6),
+                                Flexible(
+                                  child: Text(
+                                    isSecret ? '🔒 비밀 일정' : event.title,
+                                    style: TextStyle(
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.w700,
+                                      color: cs.onSurface,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            // Time
+                            Text(
+                              '${timeFormat.format(event.startTime)} – '
+                              '${timeFormat.format(event.endTime)}'
+                              '${event.location.isNotEmpty && !isSecret ? '  ·  ${event.location}' : ''}',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: cs.onSurface.withValues(alpha: 0.55),
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ),
+                      ),
+                      // Offline sync badge
+                      if (event.isOfflineCreated) ...[
+                        const SizedBox(width: 8),
+                        Tooltip(
+                          message: '동기화 대기 중',
+                          child: Icon(
+                            Icons.cloud_upload_outlined,
+                            size: 16,
+                            color: Colors.orange.shade400,
+                          ),
+                        ),
+                      ],
+                      const SizedBox(width: 4),
+                      Icon(
+                        Icons.chevron_right_rounded,
+                        size: 18,
+                        color: cs.onSurface.withValues(alpha: 0.3),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

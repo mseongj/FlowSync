@@ -51,3 +51,10 @@ FlowSync는 단순한 스케줄링 앱을 넘어, 최상위 수준의 보안과 
 ```env
 SUPABASE_URL=your_supabase_project_url
 SUPABASE_ANON_KEY=your_supabase_anon_key
+
+
+- todo
+
+-- 로그인을 하면 지금 현재 일정을 불러와서 ai 요청 시 ai에게 요청과 함께 보낼 수 있도록 해야됨.
+-- 구글 혹은 애플 캘린더와의 연동을 계획
+-- Cloudplug 를 조사하고, 현재 내 프로젝트에 적합한지 검토

@@ -5,7 +5,10 @@ import 'package:go_router/go_router.dart';
 import 'package:flow_sync/core/di/injection.dart';
 import 'package:flow_sync/features/auth/presentation/bloc/auth_bloc.dart';
 import 'package:flow_sync/features/auth/presentation/screens/auth_screen.dart';
+import 'package:flow_sync/features/family/presentation/screens/family_screen.dart';
+import 'package:flow_sync/features/nlp/domain/entities/ai_scheduling_response.dart';
 import 'package:flow_sync/features/schedule/presentation/screens/dashboard_screen.dart';
+import 'package:flow_sync/features/schedule/presentation/screens/manual_event_form_screen.dart';
 
 class GoRouterRefreshStream extends ChangeNotifier {
   GoRouterRefreshStream(Stream<dynamic> stream) {
@@ -67,6 +70,20 @@ GoRouter _createRouter() {
       GoRoute(
         path: '/dashboard',
         builder: (context, state) => const DashboardScreen(),
+      ),
+      GoRoute(
+        path: '/event/new',
+        builder: (context, state) => const ManualEventFormScreen(),
+      ),
+      GoRoute(
+        path: '/event/edit',
+        builder: (context, state) => ManualEventFormScreen(
+          prefill: state.extra as AiSchedulingResponse?,
+        ),
+      ),
+      GoRoute(
+        path: '/family',
+        builder: (context, state) => const FamilyScreen(),
       ),
     ],
   );
