@@ -127,10 +127,9 @@ class DashboardScreen extends StatelessWidget {
               onPressed: () => context.push('/family'),
             ),
             IconButton(
-              icon: const Icon(Icons.settings),
-              onPressed: () {
-                // Settings screen navigation
-              },
+              icon: const Icon(Icons.settings_rounded),
+              tooltip: '설정',
+              onPressed: () => context.push('/settings'),
             ),
           ],
         ),

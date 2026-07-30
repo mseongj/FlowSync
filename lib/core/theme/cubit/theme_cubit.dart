@@ -6,6 +6,18 @@ part 'theme_state.dart';
 
 @injectable
 class ThemeCubit extends Cubit<ThemeState> {
-  // Always use system theme as per NFR requirements
-  ThemeCubit() : super(ThemeState(ThemeMode.system));
+  ThemeCubit() : super(const ThemeState(ThemeMode.system));
+
+  /// Cycle through: system → light → dark → system
+  void toggleTheme() {
+    final next = switch (state.themeMode) {
+      ThemeMode.system => ThemeMode.light,
+      ThemeMode.light  => ThemeMode.dark,
+      ThemeMode.dark   => ThemeMode.system,
+    };
+    emit(ThemeState(next));
+  }
+
+  /// Set a specific theme mode.
+  void setThemeMode(ThemeMode mode) => emit(ThemeState(mode));
 }

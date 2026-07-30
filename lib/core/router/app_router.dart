@@ -9,6 +9,7 @@ import 'package:flow_sync/features/family/presentation/screens/family_screen.dar
 import 'package:flow_sync/features/nlp/domain/entities/ai_scheduling_response.dart';
 import 'package:flow_sync/features/schedule/presentation/screens/dashboard_screen.dart';
 import 'package:flow_sync/features/schedule/presentation/screens/manual_event_form_screen.dart';
+import 'package:flow_sync/features/settings/presentation/screens/settings_screen.dart';
 
 class GoRouterRefreshStream extends ChangeNotifier {
   GoRouterRefreshStream(Stream<dynamic> stream) {
@@ -84,6 +85,10 @@ GoRouter _createRouter() {
       GoRoute(
         path: '/family',
         builder: (context, state) => const FamilyScreen(),
+      ),
+      GoRoute(
+        path: '/settings',
+        builder: (context, state) => const SettingsScreen(),
       ),
     ],
   );

@@ -20,6 +20,7 @@ class ParentNumberSubmitted extends AuthEvent {
   final String phone;
   ParentNumberSubmitted(this.phone);
 }
+class LogoutRequested extends AuthEvent {}
 
 // STATES
 abstract class AuthState {}
@@ -85,6 +86,14 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
         emit(AuthConsentPending());
       } catch (e) {
         emit(AuthError(e.toString()));
+      }
+    });
+
+    on<LogoutRequested>((event, emit) async {
+      try {
+        await _authRepository.signOut();
+      } finally {
+        emit(AuthUnauthenticated());
       }
     });
   }
