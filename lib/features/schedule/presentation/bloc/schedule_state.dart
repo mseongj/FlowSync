@@ -7,23 +7,31 @@ class ScheduleLoading extends ScheduleState {}
 class ScheduleLoaded extends ScheduleState {
   final DateTime selectedDate;
   final List<CalendarEvent> selectedDateEvents;
-  final List<CalendarEvent> allEvents; // useful for marking days with events on calendar
+  /// All events — used for marking days on the calendar.
+  final List<CalendarEvent> allEvents;
+  /// The family group ID if this user belongs to one; null otherwise.
+  final String? familyId;
 
   ScheduleLoaded({
     required this.selectedDate,
     required this.selectedDateEvents,
     required this.allEvents,
+    this.familyId,
   });
+
+  bool get isFamilyView => familyId != null;
 
   ScheduleLoaded copyWith({
     DateTime? selectedDate,
     List<CalendarEvent>? selectedDateEvents,
     List<CalendarEvent>? allEvents,
+    String? familyId,
   }) {
     return ScheduleLoaded(
       selectedDate: selectedDate ?? this.selectedDate,
       selectedDateEvents: selectedDateEvents ?? this.selectedDateEvents,
       allEvents: allEvents ?? this.allEvents,
+      familyId: familyId ?? this.familyId,
     );
   }
 }

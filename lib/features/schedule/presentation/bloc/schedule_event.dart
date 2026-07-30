@@ -29,3 +29,11 @@ class ScheduleConnectivityChanged extends ScheduleEvent {
   final bool isOnline;
   ScheduleConnectivityChanged({required this.isOnline});
 }
+
+/// Fired when the user's family group is identified.
+/// Triggers a Supabase fetch of all family members' events.
+class FamilyGroupSet extends ScheduleEvent {
+  final String familyId;
+  final String currentUserId;
+  FamilyGroupSet({required this.familyId, required this.currentUserId});
+}

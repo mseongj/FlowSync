@@ -6,6 +6,7 @@ import 'package:injectable/injectable.dart';
 
 import 'package:flow_sync/core/background/sync_queue_manager.dart';
 import 'package:flow_sync/core/database/local_database_service.dart';
+import 'package:flow_sync/features/schedule/data/datasources/event_remote_data_source.dart';
 import 'package:flow_sync/features/schedule/domain/entities/calendar_event.dart';
 
 part 'schedule_event.dart';
@@ -15,16 +16,19 @@ part 'schedule_state.dart';
 class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
   final LocalDatabaseService _localDb;
   final OfflineSyncQueueManager _syncManager;
+  final EventRemoteDataSource _remoteSource;
   StreamSubscription<BoxEvent>? _dbSubscription;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
 
-  ScheduleBloc(this._localDb, this._syncManager) : super(ScheduleLoading()) {
+  ScheduleBloc(this._localDb, this._syncManager, this._remoteSource)
+      : super(ScheduleLoading()) {
     on<ScheduleStarted>(_onStarted);
     on<ScheduleDateSelected>(_onDateSelected);
     on<ScheduleEventsUpdated>(_onEventsUpdated);
     on<ScheduleEventSaved>(_onEventSaved);
     on<ScheduleEventDeleted>(_onEventDeleted);
     on<ScheduleConnectivityChanged>(_onConnectivityChanged);
+    on<FamilyGroupSet>(_onFamilyGroupSet);
 
     // Watch Hive for local DB changes
     _dbSubscription = _localDb.watchEvents().listen((_) {
@@ -115,11 +119,55 @@ class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
     if (!event.isOnline) return;
 
     // Back online — queue sync for every pending offline event
-    final pendingEvents =
-        _localDb.getAllEvents().where((e) => e.isOfflineCreated).toList();
+    final pendingEvents = (await _localDb.getAllEvents())
+        .where((e) => e.isOfflineCreated)
+        .toList();
 
     for (final e in pendingEvents) {
       await _syncManager.enqueueSyncTask(e.id);
+    }
+  }
+
+  /// Called when FamilyBloc determines the user belongs to a family.
+  /// Fetches the last 30 days + next 60 days of family events from Supabase
+  /// and merges them into the local Hive cache.
+  Future<void> _onFamilyGroupSet(
+    FamilyGroupSet event,
+    Emitter<ScheduleState> emit,
+  ) async {
+    try {
+      final now = DateTime.now();
+      final from = now.subtract(const Duration(days: 30));
+      final to = now.add(const Duration(days: 60));
+
+      final remoteEvents = await _remoteSource.fetchFamilyEvents(
+        familyId: event.familyId,
+        from: from,
+        to: to,
+      );
+
+      // Merge remote events into local Hive — only non-own events
+      for (final e in remoteEvents) {
+        if (e.creatorId != event.currentUserId) {
+          await _localDb.saveEvent(e);
+        }
+      }
+
+      // Update state to reflect family mode
+      if (state is ScheduleLoaded) {
+        final current = state as ScheduleLoaded;
+        final allEvents = await _localDb.getAllEvents();
+        final eventsForDate =
+            await _localDb.getEventsForDay(current.selectedDate);
+
+        emit(current.copyWith(
+          allEvents: allEvents,
+          selectedDateEvents: eventsForDate,
+          familyId: event.familyId,
+        ));
+      }
+    } catch (_) {
+      // Silently ignore network errors — local events still show
     }
   }
 

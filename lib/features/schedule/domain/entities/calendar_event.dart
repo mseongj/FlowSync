@@ -15,6 +15,9 @@ class CalendarEvent {
   final DateTime endTime;
   final EventVisibility visibility;
   final bool isOfflineCreated;
+  /// Display name of the creator — populated from Supabase join.
+  /// Null for local-only events or the current user's own events.
+  final String? creatorName;
 
   CalendarEvent({
     required this.id,
@@ -27,13 +30,16 @@ class CalendarEvent {
     required this.endTime,
     required this.visibility,
     this.isOfflineCreated = false,
+    this.creatorName,
   });
 
   /// Reconstructs a [CalendarEvent] from a Supabase `calendar_events` row.
   ///
-  /// Events coming from the server are considered already synced, so
-  /// [isOfflineCreated] defaults to `false`.
-  factory CalendarEvent.fromSupabaseJson(Map<String, dynamic> json) {
+  /// Pass [creatorName] when the query JOINs on `profiles.display_name`.
+  factory CalendarEvent.fromSupabaseJson(
+    Map<String, dynamic> json, {
+    String? creatorName,
+  }) {
     return CalendarEvent(
       id: json['id'] as String,
       familyId: json['family_id'] as String,
@@ -45,6 +51,7 @@ class CalendarEvent {
       endTime: DateTime.parse(json['end_time'] as String).toLocal(),
       visibility: _visibilityFromString(json['visibility'] as String?),
       isOfflineCreated: false,
+      creatorName: creatorName,
     );
   }
 
@@ -59,6 +66,7 @@ class CalendarEvent {
     DateTime? endTime,
     EventVisibility? visibility,
     bool? isOfflineCreated,
+    String? creatorName,
   }) {
     return CalendarEvent(
       id: id ?? this.id,
@@ -71,6 +79,7 @@ class CalendarEvent {
       endTime: endTime ?? this.endTime,
       visibility: visibility ?? this.visibility,
       isOfflineCreated: isOfflineCreated ?? this.isOfflineCreated,
+      creatorName: creatorName ?? this.creatorName,
     );
   }
 
