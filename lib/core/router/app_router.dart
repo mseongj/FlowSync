@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import 'package:flow_sync/core/di/injection.dart';
 import 'package:flow_sync/features/auth/presentation/bloc/auth_bloc.dart';
 import 'package:flow_sync/features/auth/presentation/screens/auth_screen.dart';
+import 'package:flow_sync/features/auth/presentation/screens/splash_screen.dart';
 import 'package:flow_sync/features/family/presentation/screens/family_screen.dart';
 import 'package:flow_sync/features/nlp/domain/entities/ai_scheduling_response.dart';
 import 'package:flow_sync/features/schedule/presentation/screens/dashboard_screen.dart';
@@ -60,9 +61,7 @@ GoRouter _createRouter() {
     routes: [
       GoRoute(
         path: '/',
-        builder: (context, state) => const Scaffold(
-          body: Center(child: CircularProgressIndicator()),
-        ),
+        builder: (context, state) => const SplashScreen(),
       ),
       GoRoute(
         path: '/login',

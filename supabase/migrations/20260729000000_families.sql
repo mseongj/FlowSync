@@ -55,9 +55,7 @@ ALTER TABLE public.family_invites  ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "family_members_can_read_family"
   ON public.families FOR SELECT
   USING (
-    id IN (
-      SELECT family_id FROM public.family_members WHERE user_id = auth.uid()
-    )
+    id IN (SELECT get_user_families())
   );
 
 -- families: creator can insert
@@ -66,12 +64,11 @@ CREATE POLICY "creator_can_insert_family"
   WITH CHECK (created_by = auth.uid());
 
 -- family_members: members of the family can read the member list
+-- Uses SECURITY DEFINER function to avoid infinite recursion
 CREATE POLICY "family_members_can_read_members"
   ON public.family_members FOR SELECT
   USING (
-    family_id IN (
-      SELECT family_id FROM public.family_members WHERE user_id = auth.uid()
-    )
+    family_id IN (SELECT get_user_families())
   );
 
 -- family_members: only insert if joining via valid invite or creating family
