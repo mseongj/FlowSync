@@ -51,6 +51,12 @@ ALTER TABLE public.families        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.family_members  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.family_invites  ENABLE ROW LEVEL SECURITY;
 
+-- Grant basic CRUD access — RLS policies control row-level visibility
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.families        TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.family_members  TO authenticated;
+GRANT SELECT, INSERT, UPDATE        ON public.family_invites  TO authenticated;
+GRANT SELECT                        ON public.family_invites  TO anon;
+
 -- families: only members of the family can see it
 CREATE POLICY "family_members_can_read_family"
   ON public.families FOR SELECT
