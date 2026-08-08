@@ -1,7 +1,17 @@
+import 'package:flutter/foundation.dart';
 import 'package:injectable/injectable.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'package:flow_sync/features/schedule/domain/entities/calendar_event.dart';
+
+/// Describes a real-time change on a calendar event row.
+class RealtimeEventChange {
+  final String type; // INSERT, UPDATE, DELETE
+  final CalendarEvent? event; // null on DELETE
+  final String? deletedId; // set on DELETE
+
+  RealtimeEventChange({required this.type, this.event, this.deletedId});
+}
 
 @injectable
 class EventRemoteDataSource {
@@ -16,13 +26,89 @@ class EventRemoteDataSource {
         .upsert(event.toSupabaseJson());
   }
 
+  /// Subscribes to real-time changes on `calendar_events` for a given family.
+  /// Returns a [RealtimeChannel] — call `.unsubscribe()` on dispose.
+  RealtimeChannel subscribeToFamilyEvents({
+    required String familyId,
+    required void Function(RealtimeEventChange change) onEvent,
+  }) {
+    final currentUserId = _supabase.auth.currentUser?.id;
+
+    final channel = _supabase.channel('family-events-$familyId');
+
+    channel
+        .onPostgresChanges(
+          event: PostgresChangeEvent.all,
+          schema: 'public',
+          table: 'calendar_events',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'family_id',
+            value: familyId,
+          ),
+          callback: (payload) {
+            try {
+              final eventType = payload.eventType.name.toUpperCase();
+
+              if (eventType == 'DELETE') {
+                final oldRecord = payload.oldRecord;
+                final deletedId = oldRecord['id'] as String?;
+                onEvent(RealtimeEventChange(
+                  type: 'DELETE',
+                  deletedId: deletedId,
+                ));
+                return;
+              }
+
+              // INSERT or UPDATE
+              final json = payload.newRecord;
+              if (json.isEmpty) return;
+
+              final creatorId = json['creator_id'] as String?;
+              final isOwn = creatorId == currentUserId;
+              final visibility =
+                  _visibilityFromString(json['visibility'] as String?);
+
+              CalendarEvent parsedEvent;
+
+              // PRIVATE events from others → redact
+              if (!isOwn && visibility == EventVisibility.private) {
+                parsedEvent = CalendarEvent(
+                  id: json['id'] as String,
+                  familyId: json['family_id'] as String,
+                  creatorId: creatorId ?? '',
+                  title: '바쁨',
+                  description: '',
+                  location: '',
+                  startTime: DateTime.parse(json['start_time'] as String)
+                      .toLocal(),
+                  endTime: DateTime.parse(json['end_time'] as String)
+                      .toLocal(),
+                  visibility: EventVisibility.private,
+                  creatorName: '가족',
+                );
+              } else {
+                parsedEvent = CalendarEvent.fromSupabaseJson(
+                  json,
+                  creatorName: isOwn ? null : '가족',
+                );
+              }
+
+              onEvent(RealtimeEventChange(
+                type: eventType,
+                event: parsedEvent,
+              ));
+            } catch (e) {
+              debugPrint('⚠️ Realtime parse error: $e');
+            }
+          },
+        )
+        .subscribe();
+
+    return channel;
+  }
+
   /// Fetches all events for [familyId] in the given date range.
-  ///
-  /// - PUBLIC events from all members are returned with their
-  ///   creator's display name (from a server-side join).
-  /// - PRIVATE events from other members are returned with title/
-  ///   description/location redacted as "바쁨" (enforced by RLS view).
-  /// - SECRET events from other members are blocked entirely by RLS.
   Future<List<CalendarEvent>> fetchFamilyEvents({
     required String familyId,
     required DateTime from,

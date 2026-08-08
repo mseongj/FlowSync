@@ -79,13 +79,19 @@ class NlpInputBloc extends Bloc<NlpInputEvent, NlpInputState> {
       // Save tokens ephemerally
       _ephemeralTokenMap.addAll(command.tokenMap);
 
-      // 2. Call Edge Function via Circuit Breaker
-      final response = await _aiService.processCommand(command);
+      // 2. Build tokenized chat history for multi-turn context
+      final tokenizedHistory = _buildTokenizedHistory();
 
-      // 3. Hydrate the reply message
+      // 3. Call Edge Function via Circuit Breaker (with chat history)
+      final response = await _aiService.processCommand(
+        command,
+        chatHistory: tokenizedHistory,
+      );
+
+      // 4. Hydrate the reply message
       final hydratedMessage = response.hydrateMessage(_ephemeralTokenMap);
 
-      // 4. Update Chat History
+      // 5. Update Chat History
       _chatHistory = _chatHistory.where((m) => m.id != 'pending').toList();
       _chatHistory.add(ChatMessage(
         id: _uuid.v4(),
@@ -94,7 +100,14 @@ class NlpInputBloc extends Bloc<NlpInputEvent, NlpInputState> {
         timestamp: DateTime.now(),
       ));
 
-      emit(NlpResponseReady(_chatHistory, response));
+      // 6. Emit appropriate state based on intent
+      if (response.intent == 'QUERY') {
+        // QUERY intent: AI is asking a clarifying question or reporting conflict
+        // Show as conversation bubble, not as EventPreviewCard
+        emit(NlpInitial(chatHistory: _chatHistory));
+      } else {
+        emit(NlpResponseReady(_chatHistory, response));
+      }
       
     } on CircuitOpenException catch (e) {
       _chatHistory = _chatHistory.where((m) => m.id != 'pending').toList();
@@ -103,6 +116,29 @@ class NlpInputBloc extends Bloc<NlpInputEvent, NlpInputState> {
       _chatHistory = _chatHistory.where((m) => m.id != 'pending').toList();
       emit(NlpError(_chatHistory, 'An unexpected error occurred.'));
     }
+  }
+
+  /// Builds a tokenized version of the chat history for the Edge Function.
+  /// User messages are tokenized; AI messages are sent as-is (already tokenized).
+  List<Map<String, String>> _buildTokenizedHistory() {
+    // Only include real messages (not pending, not system confirmations)
+    final realMessages = _chatHistory
+        .where((m) => !m.isPending && m.id != 'pending')
+        .toList();
+
+    // Keep last 10 turns max to avoid payload bloat
+    final recentMessages = realMessages.length > 20
+        ? realMessages.sublist(realMessages.length - 20)
+        : realMessages;
+
+    return recentMessages.map((m) {
+      return {
+        'role': m.isUser ? 'user' : 'model',
+        'text': m.isUser
+            ? _aiService.tokenize(m.text).tokenizedText
+            : m.text,
+      };
+    }).toList();
   }
 
   void _onMemoryZeroed(NlpMemoryZeroed event, Emitter<NlpInputState> emit) {

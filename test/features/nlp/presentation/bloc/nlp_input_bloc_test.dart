@@ -60,7 +60,7 @@ void main() {
       build: () {
         when(() => mockService.tokenize(any())).thenReturn(testCommand);
         when(
-          () => mockService.processCommand(any()),
+          () => mockService.processCommand(any(), chatHistory: any(named: 'chatHistory')),
         ).thenAnswer((_) async => testResponse);
         return NlpInputBloc(mockService, mockDb, mockSync);
       },
@@ -81,7 +81,7 @@ void main() {
       build: () {
         when(() => mockService.tokenize(any())).thenReturn(testCommand);
         when(
-          () => mockService.processCommand(any()),
+          () => mockService.processCommand(any(), chatHistory: any(named: 'chatHistory')),
         ).thenThrow(CircuitOpenException('Circuit is open'));
         return NlpInputBloc(mockService, mockDb, mockSync);
       },
@@ -114,7 +114,7 @@ void main() {
       build: () {
         when(() => mockService.tokenize(any())).thenReturn(testCommand);
         when(
-          () => mockService.processCommand(any()),
+          () => mockService.processCommand(any(), chatHistory: any(named: 'chatHistory')),
         ).thenAnswer((_) async => testResponse);
         return NlpInputBloc(mockService, mockDb, mockSync);
       },
@@ -141,7 +141,7 @@ void main() {
       build: () {
         when(() => mockService.tokenize(any())).thenReturn(testCommand);
         when(
-          () => mockService.processCommand(any()),
+          () => mockService.processCommand(any(), chatHistory: any(named: 'chatHistory')),
         ).thenAnswer((_) async => testResponse);
         return NlpInputBloc(mockService, mockDb, mockSync);
       },
@@ -166,7 +166,7 @@ void main() {
       build: () {
         when(() => mockService.tokenize(any())).thenReturn(testCommand);
         when(
-          () => mockService.processCommand(any()),
+          () => mockService.processCommand(any(), chatHistory: any(named: 'chatHistory')),
         ).thenThrow(Exception('Random failure'));
         return NlpInputBloc(mockService, mockDb, mockSync);
       },

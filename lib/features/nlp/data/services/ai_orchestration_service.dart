@@ -98,7 +98,10 @@ class AiOrchestrationService {
     }
   }
 
-  Future<AiSchedulingResponse> processCommand(NlpCommand command) async {
+  Future<AiSchedulingResponse> processCommand(
+    NlpCommand command, {
+    List<Map<String, String>> chatHistory = const [],
+  }) async {
     if (_isCircuitOpen()) {
       throw CircuitOpenException();
     }
@@ -106,7 +109,10 @@ class AiOrchestrationService {
     try {
       final response = await _supabase.functions.invoke(
         'nlp-agent-function',
-        body: {'text': command.tokenizedText},
+        body: {
+          'text': command.tokenizedText,
+          if (chatHistory.isNotEmpty) 'chatHistory': chatHistory,
+        },
       );
 
       if (response.status >= 400) {

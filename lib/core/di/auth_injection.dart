@@ -9,12 +9,7 @@ import 'package:flow_sync/features/auth/presentation/bloc/auth_bloc.dart';
 import 'injection.dart';
 
 void setupAuthInjection() {
-  // FlutterSecureStorage — shared singleton
-  getIt.registerLazySingleton<FlutterSecureStorage>(
-    () => const FlutterSecureStorage(
-      aOptions: AndroidOptions(encryptedSharedPreferences: true),
-    ),
-  );
+  // FlutterSecureStorage is already registered in injection.config.dart init()
 
   // Repositories & Services
   getIt.registerLazySingleton<IAuthRepository>(() => AuthRepository(getIt()));

@@ -3,6 +3,7 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:injectable/injectable.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'package:flow_sync/core/background/sync_queue_manager.dart';
 import 'package:flow_sync/core/database/local_database_service.dart';
@@ -19,6 +20,7 @@ class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
   final EventRemoteDataSource _remoteSource;
   StreamSubscription<BoxEvent>? _dbSubscription;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
+  RealtimeChannel? _realtimeChannel;
 
   ScheduleBloc(this._localDb, this._syncManager, this._remoteSource)
       : super(ScheduleLoading()) {
@@ -43,35 +45,32 @@ class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
     });
   }
 
-  void _onStarted(ScheduleStarted event, Emitter<ScheduleState> emit) {
+  Future<void> _onStarted(ScheduleStarted event, Emitter<ScheduleState> emit) async {
     final now = DateTime.now();
-
     emit(ScheduleLoading());
 
-    _localDb.getAllEvents().then((allEvents) {
-      _localDb.getEventsForDay(now).then((todayEvents) {
-        emit(ScheduleLoaded(
-          selectedDate: now,
-          selectedDateEvents: todayEvents,
-          allEvents: allEvents,
-        ));
-      });
-    });
+    final allEvents = await _localDb.getAllEvents();
+    final todayEvents = await _localDb.getEventsForDay(now);
+
+    emit(ScheduleLoaded(
+      selectedDate: now,
+      selectedDateEvents: todayEvents,
+      allEvents: allEvents,
+    ));
   }
 
-  void _onDateSelected(
+  Future<void> _onDateSelected(
     ScheduleDateSelected event,
     Emitter<ScheduleState> emit,
-  ) {
+  ) async {
     if (state is! ScheduleLoaded) return;
     final currentState = state as ScheduleLoaded;
 
-    _localDb.getEventsForDay(event.date).then((eventsForDate) {
-      emit(currentState.copyWith(
-        selectedDate: event.date,
-        selectedDateEvents: eventsForDate,
-      ));
-    });
+    final eventsForDate = await _localDb.getEventsForDay(event.date);
+    emit(currentState.copyWith(
+      selectedDate: event.date,
+      selectedDateEvents: eventsForDate,
+    ));
   }
 
   Future<void> _onEventsUpdated(
@@ -129,8 +128,8 @@ class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
   }
 
   /// Called when FamilyBloc determines the user belongs to a family.
-  /// Fetches the last 30 days + next 60 days of family events from Supabase
-  /// and merges them into the local Hive cache.
+  /// Fetches the last 30 days + next 60 days of family events from Supabase,
+  /// merges them into the local Hive cache, and starts a Realtime subscription.
   Future<void> _onFamilyGroupSet(
     FamilyGroupSet event,
     Emitter<ScheduleState> emit,
@@ -153,6 +152,13 @@ class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
         }
       }
 
+      // Start Realtime subscription for live updates
+      _realtimeChannel?.unsubscribe();
+      _realtimeChannel = _remoteSource.subscribeToFamilyEvents(
+        familyId: event.familyId,
+        onEvent: (change) => _handleRealtimeChange(change, event.currentUserId),
+      );
+
       // Update state to reflect family mode
       if (state is ScheduleLoaded) {
         final current = state as ScheduleLoaded;
@@ -171,10 +177,34 @@ class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
     }
   }
 
+  /// Handles a real-time INSERT/UPDATE/DELETE from Supabase.
+  void _handleRealtimeChange(RealtimeEventChange change, String currentUserId) {
+    switch (change.type) {
+      case 'INSERT':
+      case 'UPDATE':
+        final evt = change.event;
+        if (evt != null && evt.creatorId != currentUserId) {
+          _localDb.saveEvent(evt).then((_) {
+            add(ScheduleEventsUpdated());
+          });
+        }
+        break;
+      case 'DELETE':
+        final id = change.deletedId;
+        if (id != null) {
+          _localDb.deleteEvent(id).then((_) {
+            add(ScheduleEventsUpdated());
+          });
+        }
+        break;
+    }
+  }
+
   @override
   Future<void> close() {
     _dbSubscription?.cancel();
     _connectivitySubscription?.cancel();
+    _realtimeChannel?.unsubscribe();
     return super.close();
   }
 }

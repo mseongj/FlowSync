@@ -11,6 +11,19 @@ CREATE TABLE IF NOT EXISTS public.families (
   created_at  timestamptz NOT NULL DEFAULT now()
 );
 
+-- Ensure created_by column exists (core_schema may have created the table without it)
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'families'
+      AND column_name = 'created_by'
+  ) THEN
+    ALTER TABLE public.families ADD COLUMN created_by uuid REFERENCES auth.users(id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
 -- 2. family_members table
 CREATE TABLE IF NOT EXISTS public.family_members (
   family_id   uuid NOT NULL REFERENCES public.families(id) ON DELETE CASCADE,
