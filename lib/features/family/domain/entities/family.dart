@@ -1,3 +1,5 @@
+import 'package:flutter/widgets.dart';
+
 /// Represents a family group.
 class Family {
   final String id;
@@ -39,7 +41,7 @@ class FamilyMember {
   final String familyId;
   final String userId;
   final String email;
-  final String role; // 'admin' | 'member'
+  final String role; // 'admin' | 'parent' | 'member' | 'teenager' | 'grandparent'
   final DateTime joinedAt;
 
   const FamilyMember({
@@ -50,7 +52,19 @@ class FamilyMember {
     required this.joinedAt,
   });
 
-  bool get isAdmin => role == 'admin';
+  bool get isAdmin => role == FamilyRole.admin;
+  bool get isParent => role == FamilyRole.parent;
+  bool get isGrandparent => role == FamilyRole.grandparent;
+  bool get isTeenager => role == FamilyRole.teenager;
+
+  /// Grandparents are read-only — they can view but not edit events.
+  bool get isReadOnly => role == FamilyRole.grandparent;
+
+  /// Whether this member can manage other members' roles.
+  bool get canManageRoles => isAdmin || isParent;
+
+  String get roleLabel => FamilyRole.label(role);
+  IconData get roleIcon => FamilyRole.icon(role);
 
   factory FamilyMember.fromJson(Map<String, dynamic> json) {
     return FamilyMember(
@@ -60,6 +74,55 @@ class FamilyMember {
       role: (json['role'] as String?) ?? 'member',
       joinedAt: DateTime.parse(json['joined_at'] as String),
     );
+  }
+}
+
+/// Available family roles with display metadata.
+class FamilyRole {
+  static const admin = 'admin';
+  static const parent = 'parent';
+  static const member = 'member';
+  static const teenager = 'teenager';
+  static const grandparent = 'grandparent';
+
+  /// All assignable roles (admin excluded — only the creator is admin).
+  static const List<String> assignableRoles = [
+    parent,
+    member,
+    teenager,
+    grandparent,
+  ];
+
+  static String label(String role) {
+    switch (role) {
+      case admin:
+        return '관리자';
+      case parent:
+        return '부모';
+      case member:
+        return '멤버';
+      case teenager:
+        return '청소년';
+      case grandparent:
+        return '조부모 (읽기전용)';
+      default:
+        return role;
+    }
+  }
+
+  static IconData icon(String role) {
+    switch (role) {
+      case admin:
+        return IconData(0xe7ef, fontFamily: 'MaterialIcons'); // admin_panel_settings
+      case parent:
+        return IconData(0xe491, fontFamily: 'MaterialIcons'); // person
+      case teenager:
+        return IconData(0xe559, fontFamily: 'MaterialIcons'); // school
+      case grandparent:
+        return IconData(0xe86a, fontFamily: 'MaterialIcons'); // elderly
+      default:
+        return IconData(0xe491, fontFamily: 'MaterialIcons'); // person
+    }
   }
 }
 

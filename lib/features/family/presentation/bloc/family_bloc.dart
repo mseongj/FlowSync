@@ -29,6 +29,14 @@ class FamilyInviteAccepted extends FamilyEvent {
   FamilyInviteAccepted(this.inviteId);
 }
 
+/// Change a member's role (admin/parent only).
+class MemberRoleChangeRequested extends FamilyEvent {
+  final String familyId;
+  final String userId;
+  final String newRole;
+  MemberRoleChangeRequested(this.familyId, this.userId, this.newRole);
+}
+
 // ── States ────────────────────────────────────────────────────
 
 abstract class FamilyState {}
@@ -72,6 +80,7 @@ class FamilyBloc extends Bloc<FamilyEvent, FamilyState> {
     on<FamilyCreateRequested>(_onCreateRequested);
     on<FamilyInviteLinkRequested>(_onInviteLinkRequested);
     on<FamilyInviteAccepted>(_onInviteAccepted);
+    on<MemberRoleChangeRequested>(_onRoleChangeRequested);
   }
 
   Future<void> _onStarted(
@@ -138,6 +147,26 @@ class FamilyBloc extends Bloc<FamilyEvent, FamilyState> {
       }
     } catch (e) {
       emit(FamilyError(e.toString()));
+    }
+  }
+
+  Future<void> _onRoleChangeRequested(
+    MemberRoleChangeRequested event,
+    Emitter<FamilyState> emit,
+  ) async {
+    try {
+      await _repo.updateMemberRole(
+        familyId: event.familyId,
+        userId: event.userId,
+        newRole: event.newRole,
+      );
+      // Reload to reflect the change
+      final family = await _repo.getMyFamily();
+      if (family != null) {
+        emit(FamilyLoaded(family));
+      }
+    } catch (e) {
+      emit(FamilyError('역할 변경 실패: ${e.toString()}'));
     }
   }
 }

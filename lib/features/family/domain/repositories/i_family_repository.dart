@@ -19,4 +19,11 @@ abstract class IFamilyRepository {
   ///   2. Inserts the current user into `family_members`.
   ///   3. Marks the invite as used.
   Future<void> acceptInvite(String inviteId);
+
+  /// Updates a member's role. Only admin/parent can do this.
+  Future<void> updateMemberRole({
+    required String familyId,
+    required String userId,
+    required String newRole,
+  });
 }

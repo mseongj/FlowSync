@@ -1,5 +1,5 @@
 -- Create custom types for roles and privacy
-CREATE TYPE family_role AS ENUM ('PARENT', 'CHILD', 'TEENAGER', 'GRANDPARENT');
+CREATE TYPE family_role AS ENUM ('ADMIN', 'PARENT', 'CHILD', 'TEENAGER', 'GRANDPARENT');
 CREATE TYPE privacy_level AS ENUM ('PUBLIC', 'PRIVATE', 'SECRET');
 
 -- 1. Users table (links to auth.users)

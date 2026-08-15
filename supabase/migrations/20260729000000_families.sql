@@ -82,6 +82,19 @@ CREATE POLICY "allow_insert_own_membership"
   ON public.family_members FOR INSERT
   WITH CHECK (user_id = auth.uid());
 
+-- family_members: admin or parent can update roles
+CREATE POLICY "admin_parent_can_update_members"
+  ON public.family_members FOR UPDATE
+  USING (
+    family_id IN (SELECT get_user_families())
+    AND EXISTS (
+      SELECT 1 FROM public.family_members fm
+      WHERE fm.family_id = family_members.family_id
+        AND fm.user_id = auth.uid()
+        AND lower(fm.role::text) IN ('admin', 'parent')
+    )
+  );
+
 -- family_invites: admin can create invites
 CREATE POLICY "admin_can_create_invite"
   ON public.family_invites FOR INSERT

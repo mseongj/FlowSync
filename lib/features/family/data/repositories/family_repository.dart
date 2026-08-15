@@ -110,4 +110,17 @@ class FamilyRepository implements IFamilyRepository {
         .update({'used_at': DateTime.now().toUtc().toIso8601String(), 'used_by': _uid})
         .eq('id', inviteId);
   }
+
+  @override
+  Future<void> updateMemberRole({
+    required String familyId,
+    required String userId,
+    required String newRole,
+  }) async {
+    await _supabase
+        .from('family_members')
+        .update({'role': newRole})
+        .eq('family_id', familyId)
+        .eq('user_id', userId);
+  }
 }

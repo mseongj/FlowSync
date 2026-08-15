@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'package:flow_sync/features/family/domain/entities/family.dart';
 import 'package:flow_sync/features/family/presentation/bloc/family_bloc.dart';
@@ -576,8 +577,25 @@ class _MemberTile extends StatelessWidget {
     required this.colorScheme,
   });
 
+  Color _roleColor(String role) {
+    switch (role) {
+      case 'admin':
+        return Colors.deepPurple;
+      case 'parent':
+        return Colors.blue;
+      case 'teenager':
+        return Colors.orange;
+      case 'grandparent':
+        return Colors.teal;
+      default:
+        return colorScheme.primary;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    final roleColor = _roleColor(member.role);
+
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -592,13 +610,11 @@ class _MemberTile extends StatelessWidget {
         children: [
           CircleAvatar(
             radius: 20,
-            backgroundColor: colorScheme.primary.withValues(alpha: 0.15),
-            child: Text(
-              member.email.isNotEmpty ? member.email[0].toUpperCase() : '?',
-              style: TextStyle(
-                fontWeight: FontWeight.w700,
-                color: colorScheme.primary,
-              ),
+            backgroundColor: roleColor.withValues(alpha: 0.15),
+            child: Icon(
+              member.roleIcon,
+              size: 20,
+              color: roleColor,
             ),
           ),
           const SizedBox(width: 12),
@@ -614,6 +630,7 @@ class _MemberTile extends StatelessWidget {
                     color: colorScheme.onSurface,
                   ),
                 ),
+                const SizedBox(height: 2),
                 Text(
                   member.joinedAt.toLocal().toString().substring(0, 10),
                   style: TextStyle(
@@ -624,23 +641,153 @@ class _MemberTile extends StatelessWidget {
               ],
             ),
           ),
-          if (member.isAdmin)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+          GestureDetector(
+            onTap: () => _showRoleChangeSheet(context),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
               decoration: BoxDecoration(
-                color: colorScheme.primary.withValues(alpha: 0.12),
+                color: roleColor.withValues(alpha: 0.12),
                 borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                '관리자',
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  color: colorScheme.primary,
+                border: Border.all(
+                  color: roleColor.withValues(alpha: 0.3),
                 ),
               ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    member.roleLabel,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: roleColor,
+                    ),
+                  ),
+                  if (member.isReadOnly) ...[
+                    const SizedBox(width: 4),
+                    Icon(
+                      Icons.visibility_outlined,
+                      size: 12,
+                      color: roleColor,
+                    ),
+                  ],
+                ],
+              ),
             ),
+          ),
         ],
+      ),
+    );
+  }
+
+  void _showRoleChangeSheet(BuildContext context) {
+    // Get current user's membership to check if they can manage
+    final bloc = context.read<FamilyBloc>();
+    final currentState = bloc.state;
+    Family? family;
+    if (currentState is FamilyLoaded) {
+      family = currentState.family;
+    } else if (currentState is FamilyInviteReady) {
+      family = currentState.family;
+    }
+    if (family == null) return;
+
+    // Check if current user is admin or parent
+    final supabase = Supabase.instance.client;
+    final currentUserId = supabase.auth.currentUser?.id;
+    if (currentUserId == null) return;
+
+    final currentMember = family.members.cast<FamilyMember?>().firstWhere(
+          (m) => m!.userId == currentUserId,
+          orElse: () => null,
+        );
+    if (currentMember == null || !currentMember.canManageRoles) {
+      return; // Not authorized
+    }
+
+    // Can't change own role
+    if (member.userId == currentUserId) return;
+
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) => Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '역할 변경',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w700,
+                color: colorScheme.onSurface,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              member.email.isNotEmpty ? member.email : member.userId,
+              style: TextStyle(
+                fontSize: 14,
+                color: colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 16),
+            ...FamilyRole.assignableRoles.map((role) {
+              final isSelected = member.role == role;
+              final color = _roleColor(role);
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: ListTile(
+                  leading: CircleAvatar(
+                    backgroundColor: color.withValues(alpha: 0.15),
+                    child: Icon(
+                      FamilyRole.icon(role),
+                      color: color,
+                      size: 20,
+                    ),
+                  ),
+                  title: Text(
+                    FamilyRole.label(role),
+                    style: TextStyle(
+                      fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
+                    ),
+                  ),
+                  trailing: isSelected
+                      ? Icon(Icons.check_circle, color: color)
+                      : null,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    side: BorderSide(
+                      color: isSelected
+                          ? color.withValues(alpha: 0.5)
+                          : colorScheme.outlineVariant.withValues(alpha: 0.3),
+                    ),
+                  ),
+                  tileColor: isSelected
+                      ? color.withValues(alpha: 0.06)
+                      : null,
+                  onTap: isSelected
+                      ? null
+                      : () {
+                          Navigator.pop(context);
+                          context.read<FamilyBloc>().add(
+                                MemberRoleChangeRequested(
+                                  member.familyId,
+                                  member.userId,
+                                  role,
+                                ),
+                              );
+                        },
+                ),
+              );
+            }),
+            const SizedBox(height: 8),
+          ],
+        ),
       ),
     );
   }
