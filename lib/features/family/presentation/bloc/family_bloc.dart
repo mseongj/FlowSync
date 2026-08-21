@@ -1,6 +1,7 @@
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:injectable/injectable.dart';
 
+import 'package:flow_sync/core/crypto/family_key_exchange_service.dart';
 import 'package:flow_sync/features/family/domain/entities/family.dart';
 import 'package:flow_sync/features/family/domain/repositories/i_family_repository.dart';
 
@@ -74,8 +75,9 @@ class FamilyError extends FamilyState {
 @injectable
 class FamilyBloc extends Bloc<FamilyEvent, FamilyState> {
   final IFamilyRepository _repo;
+  final FamilyKeyExchangeService _keyExchange;
 
-  FamilyBloc(this._repo) : super(FamilyInitial()) {
+  FamilyBloc(this._repo, this._keyExchange) : super(FamilyInitial()) {
     on<FamilyStarted>(_onStarted);
     on<FamilyCreateRequested>(_onCreateRequested);
     on<FamilyInviteLinkRequested>(_onInviteLinkRequested);
@@ -107,6 +109,14 @@ class FamilyBloc extends Bloc<FamilyEvent, FamilyState> {
     emit(FamilyLoading());
     try {
       final family = await _repo.createFamily(event.name);
+
+      // E2EE: Generate ECC key pair + GMK + upload public key
+      try {
+        await _keyExchange.setupKeysForNewFamily(family.id);
+      } catch (_) {
+        // Key setup failure should not block family creation
+      }
+
       // Reload with members
       final loaded = await _repo.getMyFamily();
       emit(FamilyLoaded(loaded ?? family));
@@ -141,6 +151,14 @@ class FamilyBloc extends Bloc<FamilyEvent, FamilyState> {
       await _repo.acceptInvite(event.inviteId);
       final family = await _repo.getMyFamily();
       if (family != null) {
+        // E2EE: Generate key pair + upload + try to receive GMK
+        try {
+          await _keyExchange.setupKeysForNewMember(family.id);
+          await _keyExchange.tryReceiveGmk(family.id);
+        } catch (_) {
+          // Key exchange failure should not block joining
+        }
+
         emit(FamilyJoined(family));
       } else {
         emit(FamilyError('가족 그룹을 불러오는 데 실패했습니다.'));

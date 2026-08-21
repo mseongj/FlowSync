@@ -103,7 +103,21 @@ class NlpInputBloc extends Bloc<NlpInputEvent, NlpInputState> {
       // 6. Emit appropriate state based on intent
       if (response.intent == 'QUERY') {
         // QUERY intent: AI is asking a clarifying question or reporting conflict
-        // Show as conversation bubble, not as EventPreviewCard
+        // If conflicts detected, append a formatted conflict summary
+        if (response.hasConflicts) {
+          final conflictLines = response.conflicts.map((c) {
+            final overlap = c.overlapMinutes != null ? ' (${c.overlapMinutes}분 겹침)' : '';
+            return '  ⚠️ "${c.existingEventTitle}" ${c.existingStartTime ?? ''}~${c.existingEndTime ?? ''}$overlap';
+          }).join('\n');
+
+          _chatHistory.add(ChatMessage(
+            id: _uuid.v4(),
+            text: '📋 충돌 감지된 기존 일정:\n$conflictLines',
+            isUser: false,
+            timestamp: DateTime.now(),
+          ));
+        }
+
         emit(NlpInitial(chatHistory: _chatHistory));
       } else {
         emit(NlpResponseReady(_chatHistory, response));

@@ -207,9 +207,9 @@ class SettingsScreen extends StatelessWidget {
           _SettingsTile(
             icon: Icons.security_rounded,
             title: '프라이버시',
-            subtitle: 'E2EE 암호화 활성',
+            subtitle: 'AES-256-GCM + ECDH 키 교환 활성',
             trailing: Icon(
-              Icons.check_circle_rounded,
+              Icons.verified_rounded,
               color: Colors.green.shade400,
               size: 20,
             ),

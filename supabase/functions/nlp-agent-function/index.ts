@@ -7,6 +7,49 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
+/**
+ * Fetches the user's existing calendar events within a ±7 day window.
+ * Used as RAG context for conflict detection.
+ */
+async function fetchCalendarContext(
+  supabaseClient: ReturnType<typeof createClient>,
+  userId: string
+): Promise<string> {
+  const now = new Date()
+  const windowStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+  const windowEnd = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000)
+
+  try {
+    // Query events visible to this user (via RLS)
+    const { data: events, error } = await supabaseClient
+      .from('calendar_events')
+      .select('title, start_time, end_time, location, visibility')
+      .gte('start_time', windowStart.toISOString())
+      .lte('start_time', windowEnd.toISOString())
+      .order('start_time', { ascending: true })
+      .limit(50)
+
+    if (error || !events || events.length === 0) {
+      return ''
+    }
+
+    // Format as a compact text block for the LLM
+    const lines = events.map((e: any) => {
+      const start = new Date(e.start_time)
+      const end = new Date(e.end_time)
+      const dateStr = `${start.getMonth() + 1}/${start.getDate()}`
+      const startStr = `${start.getHours()}:${String(start.getMinutes()).padStart(2, '0')}`
+      const endStr = `${end.getHours()}:${String(end.getMinutes()).padStart(2, '0')}`
+      const loc = e.location ? ` @ ${e.location}` : ''
+      return `- ${dateStr} ${startStr}~${endStr} "${e.title}"${loc}`
+    })
+
+    return `\n\n[EXISTING CALENDAR - ${events.length} events in the next 2 weeks]\n${lines.join('\n')}`
+  } catch {
+    return ''
+  }
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders })
@@ -51,16 +94,29 @@ serve(async (req) => {
     
     console.log(`Routing to ${modelId} | hasHistory=${hasHistory} (${chatHistory?.length ?? 0} turns)`)
 
+    // RAG: Fetch existing calendar events for conflict detection
+    const calendarContext = await fetchCalendarContext(supabaseClient, user.id)
+    if (calendarContext) {
+      console.log(`RAG context loaded: ${calendarContext.split('\n').length - 2} events`)
+    }
+
     const ai = new GoogleGenAI({ apiKey: Deno.env.get('GEMINI_API_KEY') })
 
-    // Build multi-turn contents array
+    // Build system instruction with RAG context
     const systemInstruction = `You are an AI calendar assistant for FlowSync. Parse user text into scheduling intents. Rules:
 - Preserve exact tokens like [PERSON_1], [LOC_1] in your response.
 - For intent: use "CREATE_EVENT" for new events, "RESCHEDULE" for modifications, "QUERY" when asking clarifying questions or reporting conflicts.
 - When intent is "QUERY", set aiReplyMessage to your question/warning. Other fields can be null.
 - When rescheduling, remember the context from previous messages and update accordingly.
 - Always respond in the same language the user used.
-- Do not output anything except valid JSON.`
+- Do not output anything except valid JSON.
+
+CONFLICT DETECTION:
+- Check the user's existing calendar (provided below) for time overlaps with the requested event.
+- If a conflict is found, set intent to "QUERY", describe the conflict in aiReplyMessage, and populate the "conflicts" array with details of each conflicting event.
+- If no conflict, leave "conflicts" as an empty array.
+- A conflict means the new event's time range overlaps with an existing event's time range.
+${calendarContext || '\n[No existing events found]'}`
 
     // Build contents: either multi-turn array or single prompt
     let contents: any
@@ -99,9 +155,22 @@ serve(async (req) => {
                         type: Type.ARRAY, 
                         items: { type: Type.STRING } 
                     },
-                    aiReplyMessage: { type: Type.STRING }
+                    aiReplyMessage: { type: Type.STRING },
+                    conflicts: {
+                        type: Type.ARRAY,
+                        description: "List of conflicting events detected from existing calendar",
+                        items: {
+                            type: Type.OBJECT,
+                            properties: {
+                                existingEventTitle: { type: Type.STRING },
+                                existingStartTime: { type: Type.STRING },
+                                existingEndTime: { type: Type.STRING },
+                                overlapMinutes: { type: Type.NUMBER }
+                            }
+                        }
+                    }
                 },
-                required: ["intent", "participantsTokenized", "aiReplyMessage"]
+                required: ["intent", "participantsTokenized", "aiReplyMessage", "conflicts"]
             }
         }
     })
