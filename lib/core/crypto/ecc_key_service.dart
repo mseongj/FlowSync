@@ -146,9 +146,9 @@ class EccKeyService {
     final output = Uint8List(cipher.getOutputSize(ciphertextAndTag.length));
     final len = cipher.processBytes(
         ciphertextAndTag, 0, ciphertextAndTag.length, output, 0);
-    cipher.doFinal(output, len);
+    final finalLen = cipher.doFinal(output, len);
 
-    return output.sublist(0, len + cipher.doFinal(output, len));
+    return output.sublist(0, len + finalLen);
   }
 
   // ── Internal Helpers ────────────────────────────────────────────────────

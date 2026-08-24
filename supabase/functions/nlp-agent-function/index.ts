@@ -24,6 +24,7 @@ async function fetchCalendarContext(
     const { data: events, error } = await supabaseClient
       .from('calendar_events')
       .select('title, start_time, end_time, location, visibility')
+      .neq('visibility', 'secret')
       .gte('start_time', windowStart.toISOString())
       .lte('start_time', windowEnd.toISOString())
       .order('start_time', { ascending: true })

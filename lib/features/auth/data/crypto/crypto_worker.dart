@@ -1,5 +1,6 @@
 import 'dart:isolate';
 import 'dart:typed_data';
+import 'package:injectable/injectable.dart';
 // import 'package:cryptography/cryptography.dart';
 
 /// Represents a command sent to the CryptoWorkerIsolate
@@ -26,6 +27,7 @@ void cryptoWorkerEntry(SendPort mainSendPort) {
   });
 }
 
+@lazySingleton
 class CryptoWorkerManager {
   Isolate? _isolate;
   SendPort? _workerSendPort;

@@ -12,11 +12,13 @@ class AuthScreen extends StatefulWidget {
 class _AuthScreenState extends State<AuthScreen> {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
+  final _phoneController = TextEditingController();
 
   @override
   void dispose() {
     _emailController.dispose();
     _passwordController.dispose();
+    _phoneController.dispose();
     super.dispose();
   }
 
@@ -221,7 +223,6 @@ class _AuthScreenState extends State<AuthScreen> {
   }
 
   Widget _buildParentConsentForm(BuildContext context) {
-    final phoneController = TextEditingController();
     return Padding(
       padding: const EdgeInsets.all(24.0),
       child: Column(
@@ -237,7 +238,7 @@ class _AuthScreenState extends State<AuthScreen> {
           const Text('14세 미만은 보호자의 전화번호 인증이 필요합니다.'),
           const SizedBox(height: 24),
           TextField(
-            controller: phoneController,
+            controller: _phoneController,
             decoration: const InputDecoration(
               labelText: '보호자 전화번호',
               prefixIcon: Icon(Icons.phone),
@@ -253,7 +254,7 @@ class _AuthScreenState extends State<AuthScreen> {
               onPressed: () {
                 context
                     .read<AuthBloc>()
-                    .add(ParentNumberSubmitted(phoneController.text));
+                    .add(ParentNumberSubmitted(_phoneController.text));
               },
               child: const Text('OTP 전송'),
             ),
