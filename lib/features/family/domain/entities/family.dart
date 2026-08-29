@@ -1,4 +1,4 @@
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
 
 /// Represents a family group.
 class Family {
@@ -113,15 +113,15 @@ class FamilyRole {
   static IconData icon(String role) {
     switch (role) {
       case admin:
-        return IconData(0xe7ef, fontFamily: 'MaterialIcons'); // admin_panel_settings
+        return Icons.admin_panel_settings_rounded;
       case parent:
-        return IconData(0xe491, fontFamily: 'MaterialIcons'); // person
+        return Icons.person_rounded;
       case teenager:
-        return IconData(0xe559, fontFamily: 'MaterialIcons'); // school
+        return Icons.school_rounded;
       case grandparent:
-        return IconData(0xe86a, fontFamily: 'MaterialIcons'); // elderly
+        return Icons.elderly_rounded;
       default:
-        return IconData(0xe491, fontFamily: 'MaterialIcons'); // person
+        return Icons.person_rounded;
     }
   }
 }

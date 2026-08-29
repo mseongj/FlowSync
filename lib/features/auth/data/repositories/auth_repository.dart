@@ -48,8 +48,18 @@ class AuthRepository implements IAuthRepository {
 
   @override
   Future<bool> verifyParentConsentOtp(String phone, String otp) async {
-    // Mock implementation for now
-    return otp == '123456'; 
+    final response = await _supabase.functions.invoke(
+      'verify-parent-otp',
+      body: {'phone': phone, 'otp': otp},
+    );
+    if (response.status == 429) {
+      throw Exception('인증 시도 횟수를 초과했습니다. 새 OTP를 요청해주세요.');
+    }
+    if (response.status != 200) {
+      throw Exception('OTP 인증에 실패했습니다.');
+    }
+    final data = response.data as Map<String, dynamic>;
+    return data['verified'] == true;
   }
 
   @override

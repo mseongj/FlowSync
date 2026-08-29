@@ -2,7 +2,6 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 
-import 'package:crypto/crypto.dart' as legacy_crypto;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:injectable/injectable.dart';
 import 'package:pointycastle/export.dart';
@@ -14,18 +13,14 @@ import 'package:pointycastle/export.dart';
 ///   FlutterSecureStorage under [_gmkKey].
 /// - If no GMK exists (first launch), one is generated automatically.
 ///
-/// Cipher format (v2):
+/// Cipher format:
 ///   base64(0x02 || iv [12 bytes] || ciphertext || tag [16 bytes])
-///
-/// Legacy format (v1, read-only for migration):
-///   base64(iv [16 bytes] || ciphertext || hmac [32 bytes])
 @lazySingleton
 class EventCryptoService {
   static const String _gmkKey = 'flowsync_group_master_key';
 
-  /// Version markers
+  /// Version marker for AES-256-GCM
   static const int _versionGcm = 0x02;
-  static const int _versionLegacyCtr = 0x01;
 
   final FlutterSecureStorage _secureStorage;
 
@@ -96,7 +91,7 @@ class EventCryptoService {
     return base64Encode(payload);
   }
 
-  /// Decrypts the output of [encrypt]. Supports both v2 (GCM) and v1 (legacy CTR+HMAC).
+  /// Decrypts the output of [encrypt].
   Future<String> decrypt(String base64Ciphertext) async {
     final key = await _getOrCreateGmk();
     final payload = base64Decode(base64Ciphertext);
@@ -105,16 +100,17 @@ class EventCryptoService {
       throw const FormatException('Empty ciphertext.');
     }
 
-    // Check version byte
-    if (payload[0] == _versionGcm) {
-      return _decryptGcm(payload, key);
-    } else {
-      // Legacy v1 (no version byte — first byte is part of IV)
-      return _decryptLegacyCtr(payload, key);
+    if (payload[0] != _versionGcm) {
+      throw const FormatException(
+        'Unsupported ciphertext format. '
+        'Legacy CTR+HMAC data must be migrated before decryption.',
+      );
     }
+
+    return _decryptGcm(payload, key);
   }
 
-  /// AES-256-GCM decryption (v2 format)
+  /// AES-256-GCM decryption
   String _decryptGcm(Uint8List payload, Uint8List key) {
     // payload: 0x02 || iv [12] || ciphertext+tag
     if (payload.length < 1 + 12 + 16) {
@@ -143,25 +139,6 @@ class EventCryptoService {
     return utf8.decode(output.sublist(0, offset));
   }
 
-  /// Legacy AES-CTR+HMAC decryption (v1 format, for migration only)
-  String _decryptLegacyCtr(Uint8List payload, Uint8List key) {
-    if (payload.length < 16 + 32) {
-      throw const FormatException('Invalid legacy ciphertext: too short.');
-    }
-
-    final iv = payload.sublist(0, 16);
-    final ciphertext = payload.sublist(16, payload.length - 32);
-    final storedMac = payload.sublist(payload.length - 32);
-    final computedMac = _computeLegacyHmac(key, iv, ciphertext);
-
-    if (!_safeEquals(storedMac, computedMac)) {
-      throw const FormatException('MAC verification failed: data corrupted.');
-    }
-
-    final plaintext = _legacyAesCtrXor(ciphertext, key, iv);
-    return utf8.decode(plaintext);
-  }
-
   // ── Encrypt / Decrypt Field Helpers ────────────────────────────────────
 
   /// Encrypts [value] if [condition] is true; otherwise returns [value] as-is.
@@ -180,83 +157,7 @@ class EventCryptoService {
     }
   }
 
-  // ── Migration ──────────────────────────────────────────────────────────
-
-  /// Re-encrypts a legacy CTR+HMAC ciphertext to AES-GCM format.
-  /// Returns null if the input is already GCM or decryption fails.
-  Future<String?> migrateToGcm(String base64Ciphertext) async {
-    final payload = base64Decode(base64Ciphertext);
-    if (payload.isEmpty) return null;
-
-    // Already GCM?
-    if (payload[0] == _versionGcm) return null;
-
-    try {
-      final plaintext = await decrypt(base64Ciphertext);
-      return encrypt(plaintext);
-    } catch (_) {
-      return null;
-    }
-  }
-
-  /// Checks if a ciphertext is in legacy CTR+HMAC format.
-  bool isLegacyFormat(String base64Ciphertext) {
-    try {
-      final payload = base64Decode(base64Ciphertext);
-      return payload.isNotEmpty && payload[0] != _versionGcm;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  // ── Legacy Helpers (kept for backward compatibility) ────────────────────
-
-  Uint8List _legacyAesCtrXor(Uint8List data, Uint8List key, Uint8List iv) {
-    final output = Uint8List(data.length);
-    var blockIndex = 0;
-    const blockSize = 32;
-    Uint8List? keystream;
-    var ksOffset = blockSize;
-
-    for (var i = 0; i < data.length; i++) {
-      if (ksOffset >= blockSize) {
-        final counterBytes = ByteData(4)..setUint32(0, blockIndex, Endian.big);
-        final input = Uint8List.fromList([
-          ...key,
-          ...iv,
-          ...counterBytes.buffer.asUint8List(),
-        ]);
-        keystream =
-            Uint8List.fromList(legacy_crypto.sha256.convert(input).bytes);
-        blockIndex++;
-        ksOffset = 0;
-      }
-      output[i] = data[i] ^ keystream![ksOffset++];
-    }
-
-    return output;
-  }
-
-  Uint8List _computeLegacyHmac(
-    Uint8List key,
-    Uint8List iv,
-    Uint8List ciphertext,
-  ) {
-    final hmacSha256 = legacy_crypto.Hmac(legacy_crypto.sha256, key);
-    final message = Uint8List.fromList([...iv, ...ciphertext]);
-    return Uint8List.fromList(hmacSha256.convert(message).bytes);
-  }
-
   // ── Internal Helpers ────────────────────────────────────────────────────
-
-  bool _safeEquals(List<int> a, List<int> b) {
-    if (a.length != b.length) return false;
-    var result = 0;
-    for (var i = 0; i < a.length; i++) {
-      result |= a[i] ^ b[i];
-    }
-    return result == 0;
-  }
 
   Uint8List _generateRandomBytes(int length) {
     final rng = Random.secure();

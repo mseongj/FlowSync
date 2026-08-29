@@ -27,17 +27,17 @@ serve(async (req) => {
     const { data: { user }, error: userError } = await supabaseClient.auth.getUser()
     if (userError || !user) return new Response('Unauthorized', { status: 401 })
 
-    // Rate Limiting Logic
+    // Rate Limiting Logic — count ALL attempts (success + failure)
+    // to prevent unlimited fetches after a successful one
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString()
     const { data: attempts } = await supabaseAdmin
       .from('key_fetch_attempts')
       .select('id')
       .eq('user_id', user.id)
-      .eq('success', false)
       .gte('attempt_timestamp', oneHourAgo)
 
-    if (attempts && attempts.length >= 5) {
-      return new Response(JSON.stringify({ error: 'Too many failed attempts. Try again in an hour.' }), { status: 429 })
+    if (attempts && attempts.length >= 10) {
+      return new Response(JSON.stringify({ error: 'Too many requests. Try again in an hour.' }), { status: 429 })
     }
 
     // The client sends the Argon2 hash they derived from their PIN

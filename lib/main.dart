@@ -15,6 +15,7 @@ import 'package:flow_sync/features/auth/presentation/bloc/auth_bloc.dart';
 import 'package:flow_sync/features/auth/domain/repositories/i_auth_repository.dart';
 import 'package:flow_sync/features/auth/domain/entities/auth_user.dart';
 import 'package:flow_sync/features/family/presentation/bloc/family_bloc.dart';
+import 'package:flow_sync/features/auth/presentation/widgets/app_lifecycle_observer.dart';
 import 'package:flow_sync/features/family/presentation/widgets/deep_link_handler.dart';
 import 'package:flow_sync/features/nlp/presentation/bloc/nlp_input_bloc.dart';
 import 'package:flow_sync/features/schedule/presentation/bloc/schedule_bloc.dart';
@@ -196,13 +197,15 @@ class FlowSyncApp extends StatelessWidget {
       providers: providers,
       child: BlocBuilder<ThemeCubit, ThemeState>(
         builder: (context, themeState) {
-          return DeepLinkHandler(
-            child: MaterialApp.router(
-              title: 'FlowSync',
-              theme: AppTheme.lightTheme,
-              darkTheme: AppTheme.darkTheme,
-              themeMode: themeState.themeMode,
-              routerConfig: appRouter,
+          return AppLifecycleObserver(
+            child: DeepLinkHandler(
+              child: MaterialApp.router(
+                title: 'FlowSync',
+                theme: AppTheme.lightTheme,
+                darkTheme: AppTheme.darkTheme,
+                themeMode: themeState.themeMode,
+                routerConfig: appRouter,
+              ),
             ),
           );
         },

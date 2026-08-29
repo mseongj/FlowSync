@@ -1,8 +1,10 @@
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:dargon2_flutter/dargon2_flutter.dart';
 import 'package:injectable/injectable.dart';
+import 'package:pointycastle/export.dart';
 
 /// Derives cryptographic keys from user PINs using Argon2id.
 ///
@@ -48,8 +50,10 @@ class KeyDerivationService {
     return base64Encode(salt.bytes);
   }
 
-  /// Encrypts [plaintext] using a PIN-derived key (AES-256 XOR for simplicity).
-  /// In production, use AES-GCM with the derived key.
+  /// Encrypts [plaintext] using a PIN-derived key with AES-256-GCM.
+  ///
+  /// Output format: `iv [12 bytes] || ciphertext || tag [16 bytes]`
+  /// The 16-byte authentication tag ensures any tampering is detected.
   Future<Uint8List> encryptWithPin(
     String pin,
     String salt,
@@ -57,26 +61,70 @@ class KeyDerivationService {
   ) async {
     final keyBase64 = await deriveKeyFromPin(pin, salt);
     final key = base64Decode(keyBase64);
-    return _xor(plaintext, key);
+    final iv = _generateRandomBytes(12);
+
+    final cipher = GCMBlockCipher(AESEngine())
+      ..init(
+        true,
+        AEADParameters(
+          KeyParameter(Uint8List.fromList(key)),
+          128, // 16-byte tag
+          iv,
+          Uint8List(0),
+        ),
+      );
+
+    final output = Uint8List(cipher.getOutputSize(plaintext.length));
+    var offset = cipher.processBytes(plaintext, 0, plaintext.length, output, 0);
+    offset += cipher.doFinal(output, offset);
+    final ciphertextAndTag = output.sublist(0, offset);
+
+    // iv || ciphertext+tag
+    final result = Uint8List(12 + ciphertextAndTag.length);
+    result.setRange(0, 12, iv);
+    result.setRange(12, result.length, ciphertextAndTag);
+    return result;
   }
 
-  /// Decrypts [ciphertext] using a PIN-derived key.
+  /// Decrypts [ciphertext] using a PIN-derived key with AES-256-GCM.
+  ///
+  /// Throws [InvalidCipherTextException] if the PIN is wrong or data is tampered.
   Future<Uint8List> decryptWithPin(
     String pin,
     String salt,
     Uint8List ciphertext,
   ) async {
+    if (ciphertext.length < 12 + 16) {
+      throw const FormatException('Ciphertext too short for AES-GCM.');
+    }
+
     final keyBase64 = await deriveKeyFromPin(pin, salt);
     final key = base64Decode(keyBase64);
-    return _xor(ciphertext, key);
+    final iv = ciphertext.sublist(0, 12);
+    final ciphertextAndTag = ciphertext.sublist(12);
+
+    final cipher = GCMBlockCipher(AESEngine())
+      ..init(
+        false,
+        AEADParameters(
+          KeyParameter(Uint8List.fromList(key)),
+          128,
+          iv,
+          Uint8List(0),
+        ),
+      );
+
+    final output = Uint8List(cipher.getOutputSize(ciphertextAndTag.length));
+    var offset = cipher.processBytes(
+        ciphertextAndTag, 0, ciphertextAndTag.length, output, 0);
+    offset += cipher.doFinal(output, offset);
+    return output.sublist(0, offset);
   }
 
-  /// Simple XOR for short payloads (32 bytes = ECC private key length).
-  Uint8List _xor(Uint8List data, Uint8List key) {
-    final output = Uint8List(data.length);
-    for (var i = 0; i < data.length; i++) {
-      output[i] = data[i] ^ key[i % key.length];
-    }
-    return output;
+  Uint8List _generateRandomBytes(int length) {
+    final rng = Random.secure();
+    return Uint8List.fromList(
+      List.generate(length, (_) => rng.nextInt(256)),
+    );
   }
 }
