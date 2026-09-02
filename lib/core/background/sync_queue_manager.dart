@@ -35,7 +35,7 @@ void callbackDispatcher() {
       // The session should be automatically restored by Supabase.
       await Supabase.initialize(
         url: Env.supabaseUrl,
-        publishableKey: Env.supabaseAnonKey,
+        anonKey: Env.supabaseAnonKey,
       );
       final supabase = Supabase.instance.client;
 

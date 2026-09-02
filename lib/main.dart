@@ -57,7 +57,7 @@ class _AppInitializerState extends State<AppInitializer> {
       try {
         await Supabase.initialize(
           url: Env.supabaseUrl,
-          publishableKey: Env.supabaseAnonKey,
+          anonKey: Env.supabaseAnonKey,
         );
         supabaseReady = true;
         // Register SupabaseClient manually AFTER successful init

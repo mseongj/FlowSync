@@ -23,8 +23,16 @@ CREATE POLICY "deny_direct_access_otp"
   ON public.parent_consent_otps FOR ALL
   USING (false);
 
--- Cleanup: delete expired OTPs older than 1 hour
-SELECT cron.schedule('cleanup-expired-otps', '0 * * * *', $$
-  DELETE FROM public.parent_consent_otps
-  WHERE expires_at < NOW() - INTERVAL '1 hour';
-$$);
+-- Cleanup: delete expired OTPs older than 1 hour (if pg_cron is available)
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+    PERFORM cron.schedule('cleanup-expired-otps', '0 * * * *', $$
+      DELETE FROM public.parent_consent_otps
+      WHERE expires_at < NOW() - INTERVAL '1 hour';
+    $$);
+  END IF;
+EXCEPTION WHEN OTHERS THEN
+  -- pg_cron not available — safe to ignore
+  NULL;
+END $$;
