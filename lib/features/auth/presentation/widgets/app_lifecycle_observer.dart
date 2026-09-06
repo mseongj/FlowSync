@@ -33,13 +33,17 @@ class _AppLifecycleObserverState extends State<AppLifecycleObserver> with Widget
       try {
         GetIt.I<CryptoWorkerManager>().wipeMemory();
         debugPrint('CryptoWorkerManager memory wiped successfully.');
-      } catch (_) {}
+      } catch (e, st) {
+        debugPrint('Error wiping crypto memory on paused: $e\n$st');
+      }
 
       // Wipe NLP in-memory chat and tokens
       try {
         GetIt.I<NlpInputBloc>().add(NlpMemoryZeroed());
         debugPrint('NlpInputBloc memory wiped successfully.');
-      } catch (_) {}
+      } catch (e, st) {
+        debugPrint('Error wiping NLP memory on paused: $e\n$st');
+      }
     }
   }
 

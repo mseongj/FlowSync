@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:injectable/injectable.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -112,7 +113,8 @@ class FamilyKeyExchangeService {
       await _cryptoService.importGmkBase64(base64Encode(gmk));
 
       return true;
-    } catch (_) {
+    } catch (e, st) {
+      debugPrint('Error receiving GMK: $e\n$st');
       return false;
     }
   }

@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:injectable/injectable.dart';
 import '../../domain/entities/nlp_command.dart';
@@ -26,42 +27,78 @@ class AiOrchestrationService {
 
   AiOrchestrationService(this._supabase);
 
-  // Deterministic Tokenizer (Simple NER using Regex for demo)
+  // ── Korean non-name words (scheduling vocabulary) ──────────────────
+  static final _koreanNonNames = {
+    '미팅', '회의', '약속', '일정', '저녁', '점심', '아침',
+    '내일', '오늘', '모레', '다음', '이번', '저번', '지난',
+    '월요일', '화요일', '수요일', '목요일', '금요일', '토요일', '일요일',
+    '시간', '장소', '카페', '학교', '회사', '병원', '치과',
+    '식사', '수업', '출발', '도착', '예약', '취소', '변경',
+  };
+
+  // ── English non-name words ────────────────────────────────────────
+  static final _englishNonNames = {
+    'Meeting', 'Dentist', 'Doctor', 'Dinner', 'Lunch',
+    'Tomorrow', 'Today', 'Monday', 'Tuesday', 'Wednesday',
+    'Thursday', 'Friday', 'Saturday', 'Sunday',
+  };
+
+  // Deterministic Tokenizer (Bilingual NER using Regex + Korean particles)
   NlpCommand tokenize(String rawText) {
     final tokenMap = <String, String>{};
     var tokenizedText = rawText;
-
-    // A very basic simulated NER for names starting with Capital letters
-    // In production, use google_mlkit_entity_extraction
-    final nameExp = RegExp(r'\b[A-Z][a-z]+\b');
     var personCount = 1;
 
-    for (final match in nameExp.allMatches(rawText)) {
+    // ── 1. Korean Name Detection via Particle Patterns ──────────────
+    // Korean names (2-4 syllables) are detected when followed by common
+    // particles: 랑, 이랑, 하고, 과, 와, 에게, 한테, 씨, 이가, 이는 etc.
+    // Pattern: (2-4 Hangul chars) + (particle)
+    // NOTE: Longer particles must come first so regex prefers them.
+    // e.g. '이랑' before '랑', '이한테' before '한테'
+    final koreanNameWithParticle = RegExp(
+      r'([가-힣]{2,4}?)(이랑|이한테|이에게|이가|이는|이를|이의|이와|랑|하고|과|와|에게|한테|씨)',
+    );
+
+    for (final match in koreanNameWithParticle.allMatches(rawText)) {
+      final name = match.group(1)!;
+      final particle = match.group(2)!;
+
+      // Skip common non-name words
+      if (_koreanNonNames.contains(name)) continue;
+
+      // Skip if already tokenized
+      if (tokenMap.containsValue(name)) continue;
+
+      final token = '[PERSON_$personCount]';
+      tokenMap[token] = name;
+      // Replace "민지랑" → "[PERSON_1]랑" (keep the particle)
+      tokenizedText = tokenizedText.replaceAll('$name$particle', '$token$particle');
+      // Also replace standalone occurrences of the same name elsewhere
+      tokenizedText = tokenizedText.replaceAll(name, token);
+      personCount++;
+    }
+
+    // ── 2. English Name Detection (Capital-letter words) ────────────
+    final englishNameExp = RegExp(r'\b[A-Z][a-z]+\b');
+
+    for (final match in englishNameExp.allMatches(rawText)) {
       final name = match.group(0)!;
-      // Skip common non-names
-      if ([
-        'Meeting',
-        'Dentist',
-        'Doctor',
-        'Dinner',
-        'Lunch',
-        'Tomorrow',
-        'Today',
-        'Monday',
-        'Tuesday',
-        'Wednesday',
-        'Thursday',
-        'Friday',
-        'Saturday',
-        'Sunday',
-      ].contains(name)) {
-        continue;
-      }
+      if (_englishNonNames.contains(name)) continue;
+      if (tokenMap.containsValue(name)) continue;
 
       final token = '[PERSON_$personCount]';
       tokenMap[token] = name;
       tokenizedText = tokenizedText.replaceAll(name, token);
       personCount++;
+    }
+
+    // ── Debug Logging ───────────────────────────────────────────────
+    debugPrint('🔑 [Tokenizer] 원문: "$rawText"');
+    debugPrint('🔑 [Tokenizer] 토큰: "$tokenizedText"');
+    if (tokenMap.isNotEmpty) {
+      debugPrint('🔑 [Tokenizer] 맵: $tokenMap');
+    } else {
+      debugPrint('🔑 [Tokenizer] PII 감지 없음 (토큰 0개)');
     }
 
     return NlpCommand(

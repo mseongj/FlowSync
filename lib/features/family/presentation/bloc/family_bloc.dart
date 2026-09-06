@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:injectable/injectable.dart';
 
@@ -113,8 +114,8 @@ class FamilyBloc extends Bloc<FamilyEvent, FamilyState> {
       // E2EE: Generate ECC key pair + GMK + upload public key
       try {
         await _keyExchange.setupKeysForNewFamily(family.id);
-      } catch (_) {
-        // Key setup failure should not block family creation
+      } catch (e, st) {
+        debugPrint('Error setting up keys for new family: $e\n$st');
       }
 
       // Reload with members
@@ -155,8 +156,8 @@ class FamilyBloc extends Bloc<FamilyEvent, FamilyState> {
         try {
           await _keyExchange.setupKeysForNewMember(family.id);
           await _keyExchange.tryReceiveGmk(family.id);
-        } catch (_) {
-          // Key exchange failure should not block joining
+        } catch (e, st) {
+          debugPrint('Error setting up keys for new member: $e\n$st');
         }
 
         emit(FamilyJoined(family));

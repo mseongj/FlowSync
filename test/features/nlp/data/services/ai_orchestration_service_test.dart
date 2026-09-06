@@ -47,6 +47,58 @@ void main() {
       expect(result.tokenizedText, 'Meeting at Dentist for Lunch');
       expect(result.tokenMap, isEmpty);
     });
+
+    // ── Korean Name Tokenization Tests ──────────────────────────────
+
+    test('should tokenize Korean name with particle 랑', () {
+      final result = _tokenize('내일 민지랑 카페에서 미팅');
+
+      expect(result.tokenizedText, '내일 [PERSON_1]랑 카페에서 미팅');
+      expect(result.tokenMap, {'[PERSON_1]': '민지'});
+    });
+
+    test('should tokenize Korean name with particle 이랑', () {
+      final result = _tokenize('수현이랑 3시에 회의');
+
+      expect(result.tokenizedText, '[PERSON_1]이랑 3시에 회의');
+      expect(result.tokenMap, {'[PERSON_1]': '수현'});
+    });
+
+    test('should tokenize Korean name with particle 하고', () {
+      final result = _tokenize('지은이하고 점심 먹기');
+
+      expect(result.tokenizedText, '[PERSON_1]하고 점심 먹기');
+      expect(result.tokenMap, {'[PERSON_1]': '지은이'});
+    });
+
+    test('should tokenize Korean name with particle 씨', () {
+      final result = _tokenize('김태우씨 미팅 잡아줘');
+
+      expect(result.tokenizedText, '[PERSON_1]씨 미팅 잡아줘');
+      expect(result.tokenMap, {'[PERSON_1]': '김태우'});
+    });
+
+    test('should tokenize multiple Korean names', () {
+      final result = _tokenize('민지랑 수현이랑 같이 저녁');
+
+      expect(result.tokenMap.length, 2);
+      expect(result.tokenMap['[PERSON_1]'], '민지');
+      expect(result.tokenMap['[PERSON_2]'], '수현');
+    });
+
+    test('should not tokenize Korean non-name words as names', () {
+      final result = _tokenize('내일 카페에서 점심');
+
+      expect(result.tokenizedText, '내일 카페에서 점심');
+      expect(result.tokenMap, isEmpty);
+    });
+
+    test('should tokenize mixed Korean and English names', () {
+      final result = _tokenize('민지랑 Alice 미팅 잡아줘');
+
+      expect(result.tokenMap.length, 2);
+      expect(result.tokenMap.values.toSet(), {'민지', 'Alice'});
+    });
   });
 
   group('AiSchedulingResponse', () {
@@ -102,28 +154,54 @@ void main() {
   });
 }
 
-/// Standalone tokenizer extracted from AiOrchestrationService
-/// to allow testing without SupabaseClient dependency.
+/// ── Standalone tokenizer (mirrors AiOrchestrationService.tokenize) ──
+/// Allows testing without SupabaseClient dependency.
+
+const _koreanNonNames = {
+  '미팅', '회의', '약속', '일정', '저녁', '점심', '아침',
+  '내일', '오늘', '모레', '다음', '이번', '저번', '지난',
+  '월요일', '화요일', '수요일', '목요일', '금요일', '토요일', '일요일',
+  '시간', '장소', '카페', '학교', '회사', '병원', '치과',
+  '식사', '수업', '출발', '도착', '예약', '취소', '변경',
+};
+
+const _englishNonNames = {
+  'Meeting', 'Dentist', 'Doctor', 'Dinner', 'Lunch',
+  'Tomorrow', 'Today', 'Monday', 'Tuesday', 'Wednesday',
+  'Thursday', 'Friday', 'Saturday', 'Sunday',
+};
+
 _TokenizeResult _tokenize(String rawText) {
   final tokenMap = <String, String>{};
   var tokenizedText = rawText;
-
-  final nameExp = RegExp(r'\b[A-Z][a-z]+\b');
   var personCount = 1;
 
-  for (final match in nameExp.allMatches(rawText)) {
+  // 1. Korean name detection via particle patterns
+  final koreanNameWithParticle = RegExp(
+    r'([가-힣]{2,4}?)(이랑|이한테|이에게|이가|이는|이를|이의|이와|랑|하고|과|와|에게|한테|씨)',
+  );
+
+  for (final match in koreanNameWithParticle.allMatches(rawText)) {
+    final name = match.group(1)!;
+    final particle = match.group(2)!;
+
+    if (_koreanNonNames.contains(name)) continue;
+    if (tokenMap.containsValue(name)) continue;
+
+    final token = '[PERSON_$personCount]';
+    tokenMap[token] = name;
+    tokenizedText = tokenizedText.replaceAll('$name$particle', '$token$particle');
+    tokenizedText = tokenizedText.replaceAll(name, token);
+    personCount++;
+  }
+
+  // 2. English name detection
+  final englishNameExp = RegExp(r'\b[A-Z][a-z]+\b');
+
+  for (final match in englishNameExp.allMatches(rawText)) {
     final name = match.group(0)!;
-    if ([
-      'Meeting',
-      'Dentist',
-      'Doctor',
-      'Dinner',
-      'Lunch',
-      'Tomorrow',
-      'Today',
-    ].contains(name)) {
-      continue;
-    }
+    if (_englishNonNames.contains(name)) continue;
+    if (tokenMap.containsValue(name)) continue;
 
     final token = '[PERSON_$personCount]';
     tokenMap[token] = name;
@@ -139,3 +217,4 @@ class _TokenizeResult {
   final String tokenizedText;
   final Map<String, String> tokenMap;
 }
+

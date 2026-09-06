@@ -34,15 +34,21 @@ async function fetchCalendarContext(
       return ''
     }
 
-    // Format as a compact text block for the LLM
+    // Format as a compact text block for the LLM using KST
+    const df = new Intl.DateTimeFormat('ko-KR', {
+      timeZone: 'Asia/Seoul',
+      month: 'numeric',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: false,
+    })
+
     const lines = events.map((e: any) => {
-      const start = new Date(e.start_time)
-      const end = new Date(e.end_time)
-      const dateStr = `${start.getMonth() + 1}/${start.getDate()}`
-      const startStr = `${start.getHours()}:${String(start.getMinutes()).padStart(2, '0')}`
-      const endStr = `${end.getHours()}:${String(end.getMinutes()).padStart(2, '0')}`
+      const startStr = df.format(new Date(e.start_time))
+      const endStr = df.format(new Date(e.end_time))
       const loc = e.location ? ` @ ${e.location}` : ''
-      return `- ${dateStr} ${startStr}~${endStr} "${e.title}"${loc}`
+      return `- ${startStr}~${endStr} "${e.title}"${loc}`
     })
 
     return `\n\n[EXISTING CALENDAR - ${events.length} events in the next 2 weeks]\n${lines.join('\n')}`

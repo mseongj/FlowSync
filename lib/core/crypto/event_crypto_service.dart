@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:injectable/injectable.dart';
 import 'package:pointycastle/export.dart';
@@ -152,7 +153,8 @@ class EventCryptoService {
     if (!condition || value.isEmpty) return value;
     try {
       return await decrypt(value);
-    } catch (_) {
+    } catch (e, st) {
+      debugPrint('Error decrypting field value: $e\n$st');
       return '[복호화 불가]';
     }
   }

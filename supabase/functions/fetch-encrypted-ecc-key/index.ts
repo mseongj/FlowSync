@@ -4,13 +4,15 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.7.1"
 console.log("fetch-encrypted-ecc-key Edge Function starting...")
 
 serve(async (req) => {
-  if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type' } })
-  }
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+}
+
 
   try {
     const authHeader = req.headers.get('Authorization')
-    if (!authHeader) return new Response('Unauthorized', { status: 401 })
+    if (!authHeader) return new Response('Unauthorized', { status: 401, headers: corsHeaders })
 
     const supabaseClient = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
@@ -25,7 +27,7 @@ serve(async (req) => {
 
     // Verify user
     const { data: { user }, error: userError } = await supabaseClient.auth.getUser()
-    if (userError || !user) return new Response('Unauthorized', { status: 401 })
+    if (userError || !user) return new Response('Unauthorized', { status: 401, headers: corsHeaders })
 
     // Rate Limiting Logic — count ALL attempts (success + failure)
     // to prevent unlimited fetches after a successful one
@@ -37,7 +39,7 @@ serve(async (req) => {
       .gte('attempt_timestamp', oneHourAgo)
 
     if (attempts && attempts.length >= 10) {
-      return new Response(JSON.stringify({ error: 'Too many requests. Try again in an hour.' }), { status: 429 })
+      return new Response(JSON.stringify({ error: 'Too many requests. Try again in an hour.' }), { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } })
     }
 
     // The client sends the Argon2 hash they derived from their PIN
@@ -54,7 +56,7 @@ serve(async (req) => {
 
     if (keyError || !keyStore) {
       await supabaseAdmin.from('key_fetch_attempts').insert({ user_id: user.id, success: false })
-      return new Response(JSON.stringify({ error: 'Key not found' }), { status: 404 })
+      return new Response(JSON.stringify({ error: 'Key not found' }), { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } })
     }
 
     // Log success
@@ -62,9 +64,9 @@ serve(async (req) => {
 
     return new Response(
       JSON.stringify({ encrypted_payload: keyStore.encrypted_payload }),
-      { headers: { "Content-Type": "application/json" } },
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } },
     )
   } catch (error) {
-    return new Response(JSON.stringify({ error: error.message }), { status: 500 })
+    return new Response(JSON.stringify({ error: error.message }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } })
   }
 })

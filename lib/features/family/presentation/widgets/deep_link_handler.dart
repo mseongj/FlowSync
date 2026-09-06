@@ -33,12 +33,16 @@ class _DeepLinkHandlerState extends State<DeepLinkHandler> {
       if (initialLink != null) {
         _handleUri(initialLink);
       }
-    } catch (_) {}
+    } catch (e, st) {
+      debugPrint('Error getting initial deep link: $e\n$st');
+    }
 
     // Handle warm-start links (app already running)
     _appLinks.uriLinkStream.listen(
       _handleUri,
-      onError: (_) {},
+      onError: (e, st) {
+        debugPrint('Error in uriLinkStream: $e\n$st');
+      },
     );
   }
 
