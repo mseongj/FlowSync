@@ -8,6 +8,7 @@ import 'package:flow_sync/features/auth/presentation/screens/auth_screen.dart';
 import 'package:flow_sync/features/auth/presentation/screens/splash_screen.dart';
 import 'package:flow_sync/features/family/presentation/screens/family_screen.dart';
 import 'package:flow_sync/features/nlp/domain/entities/ai_scheduling_response.dart';
+import 'package:flow_sync/features/schedule/domain/entities/calendar_event.dart';
 import 'package:flow_sync/features/schedule/presentation/screens/dashboard_screen.dart';
 import 'package:flow_sync/features/schedule/presentation/screens/manual_event_form_screen.dart';
 import 'package:flow_sync/features/settings/presentation/screens/settings_screen.dart';
@@ -77,9 +78,15 @@ GoRouter _createRouter() {
       ),
       GoRoute(
         path: '/event/edit',
-        builder: (context, state) => ManualEventFormScreen(
-          prefill: state.extra as AiSchedulingResponse?,
-        ),
+        builder: (context, state) {
+          final extra = state.extra;
+          if (extra is CalendarEvent) {
+            return ManualEventFormScreen(existingEvent: extra);
+          } else if (extra is AiSchedulingResponse) {
+            return ManualEventFormScreen(prefill: extra);
+          }
+          return const ManualEventFormScreen();
+        },
       ),
       GoRoute(
         path: '/family',

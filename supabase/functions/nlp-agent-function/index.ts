@@ -5,25 +5,72 @@ import { GoogleGenAI, Type } from 'npm:@google/genai'
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Expose-Headers': 'X-FlowSync-Router-Decision, X-FlowSync-Model-Used, X-FlowSync-Latency-Ms',
+}
+
+// ── Model Constants & Thresholds ──────────────────────────────────────────
+export const MODEL_FLASH_LITE = 'gemini-2.5-flash-lite'
+export const MODEL_FLASH = 'gemini-2.5-flash'
+export const HARD_TIMEOUT_MS = 1200          // Max latency budget for primary 1st tier model
+export const COMPLEXITY_THRESHOLD = 40       // Complexity score threshold for pre-routing bypass
+export const QUALITY_SCORE_THRESHOLD = 0.75  // Response quality threshold for Flash-Lite acceptance
+
+// ── Scheduling Response Schema ────────────────────────────────────────────
+export const responseSchema = {
+  type: Type.OBJECT,
+  properties: {
+    intent: { type: Type.STRING, description: "CREATE_EVENT, RESCHEDULE, CANCEL, or QUERY" },
+    targetEventId: { 
+      type: Type.STRING, 
+      description: "The ID from [EXISTING CALENDAR] to reschedule or cancel if applicable, otherwise null" 
+    },
+    eventTitleTokenized: { type: Type.STRING },
+    locationTokenized: { type: Type.STRING },
+    startTime: { type: Type.STRING, description: "ISO 8601 timestamp" },
+    endTime: { type: Type.STRING, description: "ISO 8601 timestamp" },
+    participantsTokenized: { 
+      type: Type.ARRAY, 
+      items: { type: Type.STRING } 
+    },
+    aiReplyMessage: { type: Type.STRING },
+    conflicts: {
+      type: Type.ARRAY,
+      description: "List of conflicting events detected from existing calendar",
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          existingEventTitle: { type: Type.STRING },
+          existingStartTime: { type: Type.STRING },
+          existingEndTime: { type: Type.STRING },
+          overlapMinutes: { type: Type.NUMBER }
+        }
+      }
+    }
+  },
+  required: ["intent", "participantsTokenized", "aiReplyMessage", "conflicts"]
+}
+
+export interface CalendarContextResult {
+  contextText: string
+  eventCount: number
 }
 
 /**
  * Fetches the user's existing calendar events within a ±7 day window.
- * Used as RAG context for conflict detection.
+ * Used as RAG context for conflict detection and complexity calculation.
  */
-async function fetchCalendarContext(
+export async function fetchCalendarContext(
   supabaseClient: ReturnType<typeof createClient>,
   userId: string
-): Promise<string> {
+): Promise<CalendarContextResult> {
   const now = new Date()
   const windowStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
   const windowEnd = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000)
 
   try {
-    // Query events visible to this user (via RLS)
     const { data: events, error } = await supabaseClient
       .from('calendar_events')
-      .select('title, start_time, end_time, location, visibility')
+      .select('id, title, start_time, end_time, location, visibility')
       .neq('visibility', 'secret')
       .gte('start_time', windowStart.toISOString())
       .lte('start_time', windowEnd.toISOString())
@@ -31,10 +78,9 @@ async function fetchCalendarContext(
       .limit(50)
 
     if (error || !events || events.length === 0) {
-      return ''
+      return { contextText: '', eventCount: 0 }
     }
 
-    // Format as a compact text block for the LLM using KST
     const df = new Intl.DateTimeFormat('ko-KR', {
       timeZone: 'Asia/Seoul',
       month: 'numeric',
@@ -48,12 +94,201 @@ async function fetchCalendarContext(
       const startStr = df.format(new Date(e.start_time))
       const endStr = df.format(new Date(e.end_time))
       const loc = e.location ? ` @ ${e.location}` : ''
-      return `- ${startStr}~${endStr} "${e.title}"${loc}`
+      return `- [ID:${e.id}] ${startStr}~${endStr} "${e.title}"${loc}`
     })
 
-    return `\n\n[EXISTING CALENDAR - ${events.length} events in the next 2 weeks]\n${lines.join('\n')}`
+    const contextText = `\n\n[EXISTING CALENDAR - ${events.length} events in the next 2 weeks]\n${lines.join('\n')}`
+    return { contextText, eventCount: events.length }
   } catch {
-    return ''
+    return { contextText: '', eventCount: 0 }
+  }
+}
+
+export interface ComplexityResult {
+  isComplex: boolean
+  score: number
+  reasons: string[]
+}
+
+/**
+ * Evaluates the query complexity C(x) to decide on Pre-routing Bypass.
+ * High complexity skips 1st-tier model and routes directly to Flash/Pro.
+ */
+export function evaluateComplexity(
+  text: string,
+  chatHistory?: Array<{ role: string; text: string }>,
+  eventCount: number = 0
+): ComplexityResult {
+  let score = 0
+  const reasons: string[] = []
+
+  // 1. Negotiation & conflict resolution keywords (+40)
+  const koKeywords = /(조율|겹치|비는|언제|변경|옮겨|바꿔|취소|삭제|미뤄|당겨|시간표|스케줄|가능한|확인해)/i
+  const enKeywords = /(reschedule|conflict|find time|overlap|cancel|change|postpone|free time|available)/i
+  if (koKeywords.test(text) || enKeywords.test(text)) {
+    score += 40
+    reasons.push('scheduling_negotiation_keyword')
+  }
+
+  // 2. Multi-person interaction token check (+30)
+  // e.g. [PERSON_1] and [PERSON_2] both present
+  const personMatches = text.match(/\[PERSON_\d+\]/g)
+  if (personMatches && personMatches.length >= 2) {
+    score += 30
+    reasons.push(`multi_person_tokens(${personMatches.length})`)
+  }
+
+  // 3. Dense RAG schedule context check (+15 ~ +30)
+  if (eventCount >= 5) {
+    score += 30
+    reasons.push(`dense_calendar_context(${eventCount}_events)`)
+  } else if (eventCount >= 2) {
+    score += 15
+    reasons.push(`moderate_calendar_context(${eventCount}_events)`)
+  }
+
+  // 4. Multi-turn conversation depth (+25)
+  if (Array.isArray(chatHistory) && chatHistory.length >= 2) {
+    score += 25
+    reasons.push(`multi_turn_history(${chatHistory.length}_turns)`)
+  }
+
+  // 5. Query length / verbosity (+15)
+  if (text.length > 60) {
+    score += 15
+    reasons.push('long_prompt')
+  }
+
+  return {
+    isComplex: score >= COMPLEXITY_THRESHOLD,
+    score,
+    reasons,
+  }
+}
+
+export interface QualityScoreResult {
+  score: number
+  passed: boolean
+  reason: string
+}
+
+/**
+ * FrugalGPT Scoring Function:
+ * Evaluates response quality and schema completeness from the primary lightweight model.
+ */
+export function scoreResponseQuality(response: any): QualityScoreResult {
+  if (!response || typeof response !== 'object') {
+    return { score: 0, passed: false, reason: 'invalid_json_object' }
+  }
+
+  let score = 0
+  const reasons: string[] = []
+
+  // 1. Required core fields present (+0.35)
+  const hasCoreFields =
+    typeof response.intent === 'string' &&
+    typeof response.aiReplyMessage === 'string' &&
+    Array.isArray(response.conflicts)
+
+  if (hasCoreFields) {
+    score += 0.35
+  } else {
+    reasons.push('missing_core_fields')
+  }
+
+  // 2. Valid intent enum (+0.25)
+  const validIntents = ['CREATE_EVENT', 'RESCHEDULE', 'CANCEL', 'QUERY']
+  if (validIntents.includes(response.intent)) {
+    score += 0.25
+  } else {
+    reasons.push(`invalid_intent(${response.intent})`)
+  }
+
+  // 3. Scheduling integrity (+0.40)
+  if (response.intent === 'CREATE_EVENT' || response.intent === 'RESCHEDULE') {
+    let scheduleValid = true
+    
+    // Title must not be empty
+    if (!response.eventTitleTokenized || response.eventTitleTokenized.trim() === '') {
+      scheduleValid = false
+      reasons.push('missing_title')
+    }
+
+    // Start/End must be valid parseable timestamps with End > Start
+    const start = response.startTime ? new Date(response.startTime).getTime() : NaN
+    const end = response.endTime ? new Date(response.endTime).getTime() : NaN
+
+    if (isNaN(start) || isNaN(end) || end <= start) {
+      scheduleValid = false
+      reasons.push('invalid_time_range')
+    }
+
+    if (scheduleValid) {
+      score += 0.40
+    }
+  } else if (response.intent === 'CANCEL') {
+    // For CANCEL intent, reply message should be meaningful
+    if (response.aiReplyMessage && response.aiReplyMessage.trim().length >= 2) {
+      score += 0.40
+    } else {
+      reasons.push('empty_cancel_reply')
+    }
+  } else if (response.intent === 'QUERY') {
+    // For QUERY intent, reply message must be meaningful
+    if (response.aiReplyMessage && response.aiReplyMessage.trim().length >= 2) {
+      score += 0.40
+    } else {
+      reasons.push('empty_query_reply')
+    }
+  }
+
+  return {
+    score,
+    passed: score >= QUALITY_SCORE_THRESHOLD,
+    reason: reasons.length > 0 ? reasons.join(', ') : 'all_checks_passed',
+  }
+}
+
+/**
+ * Calls Gemini with a hard timeout using Promise.race.
+ */
+async function callGeminiWithTimeout(
+  ai: GoogleGenAI,
+  modelId: string,
+  contents: any,
+  systemInstruction: string,
+  timeoutMs: number
+): Promise<{ result: any; latencyMs: number }> {
+  const start = Date.now()
+  let timer: number | undefined
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      const err = new Error(`Model ${modelId} timed out after ${timeoutMs}ms`)
+      err.name = 'TimeoutError'
+      reject(err)
+    }, timeoutMs)
+  })
+
+  try {
+    const callPromise = ai.models.generateContent({
+      model: modelId,
+      contents: contents,
+      config: {
+        systemInstruction: systemInstruction,
+        responseMimeType: 'application/json',
+        responseSchema: responseSchema,
+      },
+    })
+
+    const response = await Promise.race([callPromise, timeoutPromise])
+    clearTimeout(timer)
+    const latencyMs = Date.now() - start
+    const result = JSON.parse(response.text ?? '{}')
+    return { result, latencyMs }
+  } catch (err) {
+    clearTimeout(timer)
+    throw err
   }
 }
 
@@ -61,6 +296,8 @@ serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders })
   }
+
+  const reqStart = Date.now()
 
   try {
     const supabaseClient = createClient(
@@ -92,29 +329,28 @@ serve(async (req) => {
       })
     }
 
-    console.time("gemini-request")
-
-    // Heuristic Router Logic
-    const isComplex = /(reschedule|conflict|find time|overlap|\[PERSON_\d+\](.*)\[PERSON_\d+\])/i.test(text)
-    const hasHistory = Array.isArray(chatHistory) && chatHistory.length > 0
-    const modelId = (isComplex || hasHistory) ? 'gemini-2.5-flash' : 'gemini-2.5-flash-lite'
-    
-    console.log(`Routing to ${modelId} | hasHistory=${hasHistory} (${chatHistory?.length ?? 0} turns)`)
-
-    // RAG: Fetch existing calendar events for conflict detection
-    const calendarContext = await fetchCalendarContext(supabaseClient, user.id)
-    if (calendarContext) {
-      console.log(`RAG context loaded: ${calendarContext.split('\n').length - 2} events`)
+    // 1. RAG Context (Existing calendar events ±7d)
+    const { contextText, eventCount } = await fetchCalendarContext(supabaseClient, user.id)
+    if (eventCount > 0) {
+      console.log(`RAG context loaded: ${eventCount} events`)
     }
 
-    const ai = new GoogleGenAI({ apiKey: Deno.env.get('GEMINI_API_KEY') })
+    // 2. Pre-routing Complexity Evaluation (FrugalGPT Step 1)
+    const complexity = evaluateComplexity(text, chatHistory, eventCount)
+    console.log(
+      `Complexity: score=${complexity.score}, isComplex=${complexity.isComplex}, reasons=[${complexity.reasons.join(', ')}]`
+    )
 
-    // Build system instruction with RAG context
+    // 3. System Instruction Assembly
     const systemInstruction = `You are an AI calendar assistant for FlowSync. Parse user text into scheduling intents. Rules:
 - Preserve exact tokens like [PERSON_1], [LOC_1] in your response.
-- For intent: use "CREATE_EVENT" for new events, "RESCHEDULE" for modifications, "QUERY" when asking clarifying questions or reporting conflicts.
+- For intent:
+  - "CREATE_EVENT": Adding a new event.
+  - "RESCHEDULE": Modifying time, date, or details of an existing event from [EXISTING CALENDAR]. Find the event ID from [ID:uuid] and populate targetEventId.
+  - "CANCEL": Deleting or canceling an existing event from [EXISTING CALENDAR]. Find the event ID from [ID:uuid] and populate targetEventId, and describe the cancellation in aiReplyMessage.
+  - "QUERY": Asking clarifying questions, reporting conflicts, or when the target event to modify/cancel cannot be found in [EXISTING CALENDAR].
 - When intent is "QUERY", set aiReplyMessage to your question/warning. Other fields can be null.
-- When rescheduling, remember the context from previous messages and update accordingly.
+- When rescheduling or canceling, match the event from [EXISTING CALENDAR]. If multiple matching events exist or ambiguous, set intent to "QUERY" and ask user for clarification.
 - Always respond in the same language the user used.
 - Do not output anything except valid JSON.
 
@@ -123,75 +359,110 @@ CONFLICT DETECTION:
 - If a conflict is found, set intent to "QUERY", describe the conflict in aiReplyMessage, and populate the "conflicts" array with details of each conflicting event.
 - If no conflict, leave "conflicts" as an empty array.
 - A conflict means the new event's time range overlaps with an existing event's time range.
-${calendarContext || '\n[No existing events found]'}`
+${contextText || '\n[No existing events found]'}`
 
-    // Build contents: either multi-turn array or single prompt
+    // 4. Build contents payload
     let contents: any
-
-    if (hasHistory) {
-      // Multi-turn: convert chatHistory to Gemini contents format
+    if (Array.isArray(chatHistory) && chatHistory.length > 0) {
       contents = chatHistory.map((msg: { role: string; text: string }) => ({
         role: msg.role === 'model' ? 'model' : 'user',
         parts: [{ text: msg.text }],
       }))
-      // Append the latest user message
-      contents.push({
-        role: 'user',
-        parts: [{ text: text }],
-      })
+      contents.push({ role: 'user', parts: [{ text: text }] })
     } else {
-      // Single-turn: just the text
       contents = text
     }
 
-    const response = await ai.models.generateContent({
-        model: modelId,
-        contents: contents,
-        config: {
-            systemInstruction: systemInstruction,
-            responseMimeType: "application/json",
-            responseSchema: {
-                type: Type.OBJECT,
-                properties: {
-                    intent: { type: Type.STRING, description: "CREATE_EVENT, RESCHEDULE, or QUERY" },
-                    eventTitleTokenized: { type: Type.STRING },
-                    locationTokenized: { type: Type.STRING },
-                    startTime: { type: Type.STRING, description: "ISO 8601 timestamp" },
-                    endTime: { type: Type.STRING, description: "ISO 8601 timestamp" },
-                    participantsTokenized: { 
-                        type: Type.ARRAY, 
-                        items: { type: Type.STRING } 
-                    },
-                    aiReplyMessage: { type: Type.STRING },
-                    conflicts: {
-                        type: Type.ARRAY,
-                        description: "List of conflicting events detected from existing calendar",
-                        items: {
-                            type: Type.OBJECT,
-                            properties: {
-                                existingEventTitle: { type: Type.STRING },
-                                existingStartTime: { type: Type.STRING },
-                                existingEndTime: { type: Type.STRING },
-                                overlapMinutes: { type: Type.NUMBER }
-                            }
-                        }
-                    }
-                },
-                required: ["intent", "participantsTokenized", "aiReplyMessage", "conflicts"]
-            }
+    const ai = new GoogleGenAI({ apiKey: Deno.env.get('GEMINI_API_KEY') })
+
+    let finalResponse: any
+    let modelUsed: string
+    let routerDecision: 'BYPASS_DIRECT_FLASH' | 'LITE_ACCEPTED' | 'FALLBACK_TIMEOUT' | 'FALLBACK_LOW_QUALITY'
+
+    // 5. Cascading Router Execution
+    if (complexity.isComplex) {
+      // ── Path A: Pre-routing Bypass to Flash ──
+      console.log(`[Router] Pre-routing bypass triggered -> Direct call to ${MODEL_FLASH}`)
+      modelUsed = MODEL_FLASH
+      routerDecision = 'BYPASS_DIRECT_FLASH'
+
+      const { result, latencyMs } = await callGeminiWithTimeout(
+        ai,
+        MODEL_FLASH,
+        contents,
+        systemInstruction,
+        10000
+      )
+      finalResponse = result
+      console.log(`[Router] ${MODEL_FLASH} direct response completed in ${latencyMs}ms`)
+    } else {
+      // ── Path B: Cascading Execution (Flash-Lite 1st -> Fallback to Flash) ──
+      console.log(`[Router] Calling primary model ${MODEL_FLASH_LITE} (Hard Timeout: ${HARD_TIMEOUT_MS}ms)...`)
+      
+      try {
+        const { result, latencyMs } = await callGeminiWithTimeout(
+          ai,
+          MODEL_FLASH_LITE,
+          contents,
+          systemInstruction,
+          HARD_TIMEOUT_MS
+        )
+
+        // Quality Scoring (FrugalGPT Step 2)
+        const quality = scoreResponseQuality(result)
+        console.log(
+          `[Router] ${MODEL_FLASH_LITE} finished in ${latencyMs}ms. Quality score=${quality.score.toFixed(2)} (passed=${quality.passed}, reason=${quality.reason})`
+        )
+
+        if (quality.passed) {
+          finalResponse = result
+          modelUsed = MODEL_FLASH_LITE
+          routerDecision = 'LITE_ACCEPTED'
+        } else {
+          console.warn(`[Router] Quality failed. Cascading to ${MODEL_FLASH}...`)
+          const fallbackRes = await callGeminiWithTimeout(
+            ai,
+            MODEL_FLASH,
+            contents,
+            systemInstruction,
+            10000
+          )
+          finalResponse = fallbackRes.result
+          modelUsed = MODEL_FLASH
+          routerDecision = 'FALLBACK_LOW_QUALITY'
         }
-    })
+      } catch (err: any) {
+        const isTimeout = err.name === 'TimeoutError'
+        console.warn(`[Router] ${MODEL_FLASH_LITE} failed (${isTimeout ? 'TIMEOUT' : err.message}). Cascading to ${MODEL_FLASH}...`)
 
-    console.timeEnd("gemini-request")
-    
-    const responseJson = JSON.parse(response.text ?? "{}")
+        const fallbackRes = await callGeminiWithTimeout(
+          ai,
+          MODEL_FLASH,
+          contents,
+          systemInstruction,
+          10000
+        )
+        finalResponse = fallbackRes.result
+        modelUsed = MODEL_FLASH
+        routerDecision = isTimeout ? 'FALLBACK_TIMEOUT' : 'FALLBACK_LOW_QUALITY'
+      }
+    }
 
-    return new Response(JSON.stringify(responseJson), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    const totalDurationMs = Date.now() - reqStart
+    console.log(`[Router] Total request completed in ${totalDurationMs}ms | Model=${modelUsed} | Decision=${routerDecision}`)
+
+    return new Response(JSON.stringify(finalResponse), {
+      headers: {
+        ...corsHeaders,
+        'Content-Type': 'application/json',
+        'X-FlowSync-Router-Decision': routerDecision,
+        'X-FlowSync-Model-Used': modelUsed,
+        'X-FlowSync-Latency-Ms': totalDurationMs.toString(),
+      },
       status: 200,
     })
-  } catch (error) {
-    console.error(error)
+  } catch (error: any) {
+    console.error('[Router Error]', error)
     return new Response(JSON.stringify({ error: error.message }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       status: 500,

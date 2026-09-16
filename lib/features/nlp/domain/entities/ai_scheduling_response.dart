@@ -24,6 +24,7 @@ class ScheduleConflict {
 
 class AiSchedulingResponse {
   final String intent;
+  final String? targetEventId;
   final String? eventTitleTokenized;
   final String? locationTokenized;
   final DateTime? startTime;
@@ -34,6 +35,7 @@ class AiSchedulingResponse {
 
   AiSchedulingResponse({
     required this.intent,
+    this.targetEventId,
     this.eventTitleTokenized,
     this.locationTokenized,
     this.startTime,
@@ -49,6 +51,7 @@ class AiSchedulingResponse {
   factory AiSchedulingResponse.fromJson(Map<String, dynamic> json) {
     return AiSchedulingResponse(
       intent: json['intent'] as String? ?? 'UNKNOWN',
+      targetEventId: json['targetEventId'] as String?,
       eventTitleTokenized: json['eventTitleTokenized'] as String?,
       locationTokenized: json['locationTokenized'] as String?,
       startTime: json['startTime'] != null
@@ -76,5 +79,35 @@ class AiSchedulingResponse {
       hydrated = hydrated.replaceAll(token, rawValue);
     });
     return hydrated;
+  }
+
+  /// Hydrates all tokenized fields (message, title, location, participants)
+  /// and returns a restored copy of AiSchedulingResponse.
+  AiSchedulingResponse hydrateAll(Map<String, String> tokenMap) {
+    if (tokenMap.isEmpty) return this;
+
+    String hydrate(String? text) {
+      if (text == null) return '';
+      var result = text;
+      tokenMap.forEach((token, rawValue) {
+        result = result.replaceAll(token, rawValue);
+      });
+      return result;
+    }
+
+    return AiSchedulingResponse(
+      intent: intent,
+      targetEventId: targetEventId,
+      eventTitleTokenized:
+          eventTitleTokenized != null ? hydrate(eventTitleTokenized) : null,
+      locationTokenized:
+          locationTokenized != null ? hydrate(locationTokenized) : null,
+      startTime: startTime,
+      endTime: endTime,
+      participantsTokenized:
+          participantsTokenized.map((p) => hydrate(p)).toList(),
+      aiReplyMessage: hydrate(aiReplyMessage),
+      conflicts: conflicts,
+    );
   }
 }

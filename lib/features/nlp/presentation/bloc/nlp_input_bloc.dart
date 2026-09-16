@@ -25,7 +25,27 @@ class NlpInputBloc extends Bloc<NlpInputEvent, NlpInputState> {
   NlpInputBloc(this._aiService, this._localDb, this._syncManager) : super(NlpInitial()) {
     on<NlpMessageSent>(_onMessageSent);
     on<NlpEventConfirmed>(_onEventConfirmed);
+    on<NlpEventCancelled>(_onEventCancelled);
     on<NlpMemoryZeroed>(_onMemoryZeroed);
+  }
+
+  Future<void> _onEventCancelled(NlpEventCancelled event, Emitter<NlpInputState> emit) async {
+    // Delete from local database
+    if (event.eventId.isNotEmpty) {
+      await _localDb.deleteEvent(event.eventId);
+    }
+
+    // Clear ephemeral map and add system message
+    _ephemeralTokenMap.clear();
+
+    _chatHistory.add(ChatMessage(
+      id: _uuid.v4(),
+      text: '🗑️ "${event.eventTitle}" 일정이 취소되었습니다.',
+      isUser: false,
+      timestamp: DateTime.now(),
+    ));
+
+    emit(NlpInitial(chatHistory: _chatHistory));
   }
 
   Future<void> _onEventConfirmed(NlpEventConfirmed event, Emitter<NlpInputState> emit) async {
@@ -42,7 +62,7 @@ class NlpInputBloc extends Bloc<NlpInputEvent, NlpInputState> {
     
     _chatHistory.add(ChatMessage(
       id: _uuid.v4(),
-      text: 'Event "${event.event.title}" confirmed and saved.',
+      text: '일정 "${event.event.title}"이(가) 확정되어 저장되었습니다.',
       isUser: false,
       timestamp: DateTime.now(),
     ));
@@ -88,24 +108,24 @@ class NlpInputBloc extends Bloc<NlpInputEvent, NlpInputState> {
         chatHistory: tokenizedHistory,
       );
 
-      // 4. Hydrate the reply message
-      final hydratedMessage = response.hydrateMessage(_ephemeralTokenMap);
+      // 4. Hydrate all response fields (message, title, location, participants)
+      final hydratedResponse = response.hydrateAll(_ephemeralTokenMap);
 
       // 5. Update Chat History
       _chatHistory = _chatHistory.where((m) => m.id != 'pending').toList();
       _chatHistory.add(ChatMessage(
         id: _uuid.v4(),
-        text: hydratedMessage,
+        text: hydratedResponse.aiReplyMessage,
         isUser: false,
         timestamp: DateTime.now(),
       ));
 
       // 6. Emit appropriate state based on intent
-      if (response.intent == 'QUERY') {
+      if (hydratedResponse.intent == 'QUERY') {
         // QUERY intent: AI is asking a clarifying question or reporting conflict
         // If conflicts detected, append a formatted conflict summary
-        if (response.hasConflicts) {
-          final conflictLines = response.conflicts.map((c) {
+        if (hydratedResponse.hasConflicts) {
+          final conflictLines = hydratedResponse.conflicts.map((c) {
             final overlap = c.overlapMinutes != null ? ' (${c.overlapMinutes}분 겹침)' : '';
             return '  ⚠️ "${c.existingEventTitle}" ${c.existingStartTime ?? ''}~${c.existingEndTime ?? ''}$overlap';
           }).join('\n');
@@ -120,7 +140,7 @@ class NlpInputBloc extends Bloc<NlpInputEvent, NlpInputState> {
 
         emit(NlpInitial(chatHistory: _chatHistory));
       } else {
-        emit(NlpResponseReady(_chatHistory, response));
+        emit(NlpResponseReady(_chatHistory, hydratedResponse));
       }
       
     } on CircuitOpenException catch (e) {

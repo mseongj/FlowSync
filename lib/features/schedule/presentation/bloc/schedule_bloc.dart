@@ -57,6 +57,9 @@ class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
       selectedDateEvents: todayEvents,
       allEvents: allEvents,
     ));
+
+    // Trigger sync for any pending offline events on start
+    _syncManager.syncAllPending();
   }
 
   Future<void> _onDateSelected(
@@ -94,13 +97,12 @@ class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
     Emitter<ScheduleState> emit,
   ) async {
     await _localDb.saveEvent(event.event);
+    add(ScheduleEventsUpdated());
 
-    // If created offline, enqueue a one-off background sync task.
+    // If created offline, attempt sync immediately
     if (event.event.isOfflineCreated) {
       await _syncManager.enqueueSyncTask(event.event.id);
     }
-
-    add(ScheduleEventsUpdated());
   }
 
   Future<void> _onEventDeleted(
@@ -117,14 +119,8 @@ class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
   ) async {
     if (!event.isOnline) return;
 
-    // Back online — queue sync for every pending offline event
-    final pendingEvents = (await _localDb.getAllEvents())
-        .where((e) => e.isOfflineCreated)
-        .toList();
-
-    for (final e in pendingEvents) {
-      await _syncManager.enqueueSyncTask(e.id);
-    }
+    // Back online — trigger immediate sync for all pending offline events
+    await _syncManager.syncAllPending();
   }
 
   /// Called when FamilyBloc determines the user belongs to a family.

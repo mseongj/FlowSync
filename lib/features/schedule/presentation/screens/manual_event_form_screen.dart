@@ -3,7 +3,9 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 import 'package:uuid/uuid.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'package:flow_sync/features/family/presentation/bloc/family_bloc.dart';
 import 'package:flow_sync/features/nlp/domain/entities/ai_scheduling_response.dart';
 import 'package:flow_sync/features/schedule/domain/entities/calendar_event.dart';
 import 'package:flow_sync/features/schedule/presentation/bloc/schedule_bloc.dart';
@@ -12,7 +14,14 @@ class ManualEventFormScreen extends StatefulWidget {
   /// Pre-filled from AI suggestion. Null when creating a brand-new event.
   final AiSchedulingResponse? prefill;
 
-  const ManualEventFormScreen({super.key, this.prefill});
+  /// Existing event to edit. Null when creating a new event.
+  final CalendarEvent? existingEvent;
+
+  const ManualEventFormScreen({
+    super.key,
+    this.prefill,
+    this.existingEvent,
+  });
 
   @override
   State<ManualEventFormScreen> createState() => _ManualEventFormScreenState();
@@ -52,18 +61,27 @@ class _ManualEventFormScreenState extends State<ManualEventFormScreen>
       curve: Curves.easeOutCubic,
     ));
 
-    // Pre-fill from AI suggestion
-    final now = DateTime.now();
-    _startTime = widget.prefill?.startTime ??
-        DateTime(now.year, now.month, now.day, now.hour + 1);
-    _endTime = widget.prefill?.endTime ??
-        _startTime.add(const Duration(hours: 1));
+    final existing = widget.existingEvent;
+    final prefill = widget.prefill;
 
-    if (widget.prefill != null) {
-      _titleController.text =
-          widget.prefill!.eventTitleTokenized ?? '';
-      _locationController.text =
-          widget.prefill!.locationTokenized ?? '';
+    if (existing != null) {
+      _startTime = existing.startTime;
+      _endTime = existing.endTime;
+      _titleController.text = existing.title;
+      _locationController.text = existing.location;
+      _descriptionController.text = existing.description;
+      _visibility = existing.visibility;
+    } else {
+      final now = DateTime.now();
+      _startTime = prefill?.startTime ??
+          DateTime(now.year, now.month, now.day, now.hour + 1);
+      _endTime = prefill?.endTime ??
+          _startTime.add(const Duration(hours: 1));
+
+      if (prefill != null) {
+        _titleController.text = prefill.eventTitleTokenized ?? '';
+        _locationController.text = prefill.locationTokenized ?? '';
+      }
     }
 
     _animController.forward();
@@ -145,26 +163,48 @@ class _ManualEventFormScreenState extends State<ManualEventFormScreen>
   void _save() {
     if (!_formKey.currentState!.validate()) return;
 
-    final event = CalendarEvent(
-      id: const Uuid().v4(),
-      familyId: 'family_1',
-      creatorId: 'user_1',
-      title: _titleController.text.trim(),
-      description: _descriptionController.text.trim(),
-      location: _locationController.text.trim(),
-      startTime: _startTime,
-      endTime: _endTime.isBefore(_startTime)
-          ? _startTime.add(const Duration(hours: 1))
-          : _endTime,
-      visibility: _visibility,
-      isOfflineCreated: true,
-    );
+    final existing = widget.existingEvent;
+    final prefill = widget.prefill;
+    final authUserId = Supabase.instance.client.auth.currentUser?.id ?? '';
+    final familyState = context.read<FamilyBloc>().state;
+    final currentFamilyId = familyState is FamilyLoaded
+        ? familyState.family.id
+        : (familyState is FamilyInviteReady ? familyState.family.id : '');
+
+    final isRescheduleAi = prefill?.intent == 'RESCHEDULE' && prefill?.targetEventId != null;
+
+    final event = existing != null
+        ? existing.copyWith(
+            title: _titleController.text.trim(),
+            description: _descriptionController.text.trim(),
+            location: _locationController.text.trim(),
+            startTime: _startTime,
+            endTime: _endTime.isBefore(_startTime)
+                ? _startTime.add(const Duration(hours: 1))
+                : _endTime,
+            visibility: _visibility,
+            isOfflineCreated: true,
+          )
+        : CalendarEvent(
+            id: prefill?.targetEventId ?? const Uuid().v4(),
+            familyId: currentFamilyId.isNotEmpty ? currentFamilyId : 'family_1',
+            creatorId: authUserId.isNotEmpty ? authUserId : 'user_1',
+            title: _titleController.text.trim(),
+            description: _descriptionController.text.trim(),
+            location: _locationController.text.trim(),
+            startTime: _startTime,
+            endTime: _endTime.isBefore(_startTime)
+                ? _startTime.add(const Duration(hours: 1))
+                : _endTime,
+            visibility: _visibility,
+            isOfflineCreated: true,
+          );
 
     context.read<ScheduleBloc>().add(ScheduleEventSaved(event));
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: const Text('일정이 저장되었습니다 ✅'),
+        content: Text((existing != null || isRescheduleAi) ? '일정이 수정되었습니다 ✅' : '일정이 저장되었습니다 ✅'),
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(12),
@@ -180,7 +220,14 @@ class _ManualEventFormScreenState extends State<ManualEventFormScreen>
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final isExisting = widget.existingEvent != null;
     final isAiPrefilled = widget.prefill != null;
+
+    final titleText = isExisting
+        ? '일정 수정'
+        : (isAiPrefilled
+            ? (widget.prefill?.intent == 'RESCHEDULE' ? 'AI 일정 변경' : 'AI 제안 수정')
+            : '새 일정');
 
     return Scaffold(
       body: FadeTransition(
@@ -196,7 +243,7 @@ class _ManualEventFormScreenState extends State<ManualEventFormScreen>
                 flexibleSpace: FlexibleSpaceBar(
                   titlePadding: const EdgeInsets.only(left: 56, bottom: 16),
                   title: Text(
-                    isAiPrefilled ? 'AI 제안 수정' : '새 일정',
+                    titleText,
                     style: const TextStyle(
                       fontSize: 18,
                       fontWeight: FontWeight.w700,

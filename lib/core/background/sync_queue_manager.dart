@@ -49,11 +49,17 @@ void callbackDispatcher() {
 
         for (final event in pendingEvents) {
           try {
+            final currentUser = supabase.auth.currentUser;
+            final eventToSync = (currentUser != null &&
+                    (event.creatorId.isEmpty || event.creatorId == 'user_1'))
+                ? event.copyWith(creatorId: currentUser.id)
+                : event;
+
             await supabase
                 .from('calendar_events')
-                .upsert(event.toSupabaseJson());
+                .upsert(eventToSync.toSupabaseJson());
             // Update local state to prevent re-sync and mark as synced
-            await box.put(event.id, event.copyWith(isOfflineCreated: false));
+            await box.put(event.id, eventToSync.copyWith(isOfflineCreated: false));
           } catch (e) {
             debugPrint('Failed to sync event ${event.id}: $e');
             allSuccess = false;
@@ -67,10 +73,16 @@ void callbackDispatcher() {
           final event = box.get(eventId);
           if (event != null && event.isOfflineCreated) {
             try {
+              final currentUser = supabase.auth.currentUser;
+              final eventToSync = (currentUser != null &&
+                      (event.creatorId.isEmpty || event.creatorId == 'user_1'))
+                  ? event.copyWith(creatorId: currentUser.id)
+                  : event;
+
               await supabase
                   .from('calendar_events')
-                  .upsert(event.toSupabaseJson());
-              await box.put(event.id, event.copyWith(isOfflineCreated: false));
+                  .upsert(eventToSync.toSupabaseJson());
+              await box.put(event.id, eventToSync.copyWith(isOfflineCreated: false));
             } catch (e) {
               debugPrint('Failed to sync event $eventId: $e');
               allSuccess = false;
@@ -109,15 +121,79 @@ class OfflineSyncQueueManager {
     );
   }
 
+  /// Attempts immediate in-app sync first to clear the pending badge instantly.
+  /// Falls back to background Workmanager if offline or if network fails.
   Future<void> enqueueSyncTask(String eventId) async {
-    await Workmanager().registerOneOffTask(
-      'sync_$eventId',
-      oneOffSyncTaskName,
-      inputData: {'eventId': eventId},
-      constraints: Constraints(networkType: NetworkType.connected),
-      existingWorkPolicy: ExistingWorkPolicy.replace,
-      backoffPolicy: BackoffPolicy.exponential,
-      backoffPolicyDelay: const Duration(minutes: 5),
-    );
+    final synced = await syncEventImmediately(eventId);
+    if (synced) return;
+
+    try {
+      await Workmanager().registerOneOffTask(
+        'sync_$eventId',
+        oneOffSyncTaskName,
+        inputData: {'eventId': eventId},
+        constraints: Constraints(networkType: NetworkType.connected),
+        existingWorkPolicy: ExistingWorkPolicy.replace,
+        backoffPolicy: BackoffPolicy.exponential,
+        backoffPolicyDelay: const Duration(minutes: 5),
+      );
+    } catch (e) {
+      debugPrint('Failed to register Workmanager task: $e');
+    }
+  }
+
+  /// Pushes [eventId] to Supabase immediately using the active foreground session.
+  /// Updates local Hive state with `isOfflineCreated: false` upon success.
+  Future<bool> syncEventImmediately(String eventId) async {
+    try {
+      if (!Hive.isBoxOpen('calendar_events')) return false;
+      final box = Hive.box<CalendarEvent>('calendar_events');
+      final event = box.get(eventId);
+      if (event == null || !event.isOfflineCreated) {
+        return true;
+      }
+
+      final client = Supabase.instance.client;
+      final currentUser = client.auth.currentUser;
+
+      if (currentUser == null) {
+        debugPrint('[SyncQueue] No active auth session; deferring event $eventId');
+        return false;
+      }
+
+      // Ensure creatorId matches auth.uid() for Supabase RLS policy compliance
+      final eventToSync = (event.creatorId.isEmpty || event.creatorId == 'user_1')
+          ? event.copyWith(creatorId: currentUser.id)
+          : event;
+
+      await client
+          .from('calendar_events')
+          .upsert(eventToSync.toSupabaseJson());
+
+      // Mark offline sync completed in local storage — triggers watchEvents()
+      await box.put(event.id, eventToSync.copyWith(isOfflineCreated: false));
+      debugPrint('⚡ [Immediate Sync] Event $eventId synced to Supabase. Pending badge cleared.');
+      return true;
+    } catch (e) {
+      debugPrint('Immediate sync failed for $eventId (will use background worker): $e');
+      return false;
+    }
+  }
+
+  /// Synchronizes all pending offline events immediately in foreground.
+  Future<void> syncAllPending() async {
+    try {
+      if (!Hive.isBoxOpen('calendar_events')) return;
+      final box = Hive.box<CalendarEvent>('calendar_events');
+      final pendingEvents = box.values
+          .where((e) => e.isOfflineCreated)
+          .toList();
+
+      for (final event in pendingEvents) {
+        await enqueueSyncTask(event.id);
+      }
+    } catch (e) {
+      debugPrint('syncAllPending failed: $e');
+    }
   }
 }

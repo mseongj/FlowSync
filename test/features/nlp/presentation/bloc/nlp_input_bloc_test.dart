@@ -180,5 +180,55 @@ void main() {
         ),
       ],
     );
+    blocTest<NlpInputBloc, NlpInputState>(
+      'emits [NlpProcessing, NlpResponseReady] with targetEventId on RESCHEDULE intent',
+      build: () {
+        when(() => mockService.tokenize(any())).thenReturn(testCommand);
+        when(
+          () => mockService.processCommand(any(), chatHistory: any(named: 'chatHistory')),
+        ).thenAnswer((_) async => AiSchedulingResponse(
+          intent: 'RESCHEDULE',
+          targetEventId: 'event_uuid_123',
+          eventTitleTokenized: 'Meeting with [PERSON_1]',
+          participantsTokenized: const ['[PERSON_1]'],
+          startTime: DateTime(2026, 7, 15, 15),
+          endTime: DateTime(2026, 7, 15, 16),
+          aiReplyMessage: 'Rescheduled meeting with [PERSON_1].',
+        ));
+        return NlpInputBloc(mockService, mockDb, mockSync);
+      },
+      act: (bloc) => bloc.add(NlpMessageSent('Move meeting with Alice to 3pm')),
+      expect: () => [
+        isA<NlpProcessing>(),
+        isA<NlpResponseReady>().having(
+          (s) => s.aiResponse.intent,
+          'intent',
+          'RESCHEDULE',
+        ).having(
+          (s) => s.aiResponse.targetEventId,
+          'targetEventId',
+          'event_uuid_123',
+        ),
+      ],
+    );
+
+    blocTest<NlpInputBloc, NlpInputState>(
+      'deletes event from localDb and emits [NlpInitial] on NlpEventCancelled',
+      build: () {
+        when(() => mockDb.deleteEvent(any())).thenAnswer((_) async {});
+        return NlpInputBloc(mockService, mockDb, mockSync);
+      },
+      act: (bloc) => bloc.add(NlpEventCancelled('event_uuid_123', eventTitle: 'Meeting with Alice')),
+      expect: () => [
+        isA<NlpInitial>().having(
+          (s) => s.chatHistory.last.text,
+          'cancellation text',
+          contains('취소되었습니다'),
+        ),
+      ],
+      verify: (_) {
+        verify(() => mockDb.deleteEvent('event_uuid_123')).called(1);
+      },
+    );
   });
 }

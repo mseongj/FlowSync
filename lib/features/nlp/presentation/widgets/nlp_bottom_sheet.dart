@@ -1,5 +1,7 @@
 import 'dart:ui';
 
+import 'package:flow_sync/features/nlp/presentation/widgets/animated_ai_status.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
@@ -10,7 +12,9 @@ import 'package:flow_sync/features/nlp/presentation/bloc/nlp_input_event.dart';
 import 'package:flow_sync/features/nlp/presentation/bloc/nlp_input_state.dart';
 import 'package:flow_sync/features/nlp/presentation/widgets/chat_history_list.dart';
 import 'package:flow_sync/features/nlp/presentation/widgets/event_preview_card.dart';
+import 'package:flow_sync/features/family/presentation/bloc/family_bloc.dart';
 import 'package:flow_sync/features/schedule/domain/entities/calendar_event.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 class NlpBottomSheet extends StatefulWidget {
   const NlpBottomSheet({super.key});
@@ -132,13 +136,11 @@ class _NlpBottomSheetState extends State<NlpBottomSheet>
                         ),
                       ),
                       const SizedBox(width: 12),
-                      Text(
-                        'AI 일정 비서',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w700,
-                          color: colorScheme.onSurface,
-                        ),
+                      BlocBuilder<NlpInputBloc, NlpInputState>(
+                        builder: (context, state) {
+                          final isProcessing = state is NlpProcessing;
+                          return AnimatedAiStatus(isProcessing: isProcessing);
+                        },
                       ),
                       const Spacer(),
                       IconButton(
@@ -223,33 +225,73 @@ class _NlpBottomSheetState extends State<NlpBottomSheet>
           ),
         ),
         if (state is NlpResponseReady &&
-            state.aiResponse.intent == 'CREATE_EVENT')
-          EventPreviewCard(
-            aiResponse: state.aiResponse,
-            onConfirm: () {
-              final event = CalendarEvent(
-                id: const Uuid().v4(),
-                familyId: 'family_1',
-                creatorId: 'user_1',
-                title: state.aiResponse.eventTitleTokenized ?? '새 일정',
-                description: 'AI가 생성한 일정',
-                location: state.aiResponse.locationTokenized ?? '',
-                startTime:
-                    state.aiResponse.startTime ?? DateTime.now(),
-                endTime: state.aiResponse.endTime ??
-                    DateTime.now().add(const Duration(hours: 1)),
-                visibility: EventVisibility.public,
-                isOfflineCreated: true,
-              );
-              context
-                  .read<NlpInputBloc>()
-                  .add(NlpEventConfirmed(event));
-              Navigator.of(context).pop();
-            },
-            onEdit: () {
-              Navigator.of(context).pop();
-              context.push('/event/edit', extra: state.aiResponse);
-            },
+            (state.aiResponse.intent == 'CREATE_EVENT' ||
+                state.aiResponse.intent == 'RESCHEDULE'))
+          _SlideUpFadeIn(
+            child: EventPreviewCard(
+              aiResponse: state.aiResponse,
+              onConfirm: () {
+                // Get real user/family IDs from auth & bloc state
+                final userId =
+                    Supabase.instance.client.auth.currentUser?.id ?? '';
+                final familyState = context.read<FamilyBloc>().state;
+                final familyId = familyState is FamilyLoaded
+                    ? familyState.family.id
+                    : (familyState is FamilyInviteReady
+                        ? familyState.family.id
+                        : '');
+
+                final eventId = (state.aiResponse.intent == 'RESCHEDULE' &&
+                        state.aiResponse.targetEventId != null)
+                    ? state.aiResponse.targetEventId!
+                    : const Uuid().v4();
+
+                final event = CalendarEvent(
+                  id: eventId,
+                  familyId: familyId,
+                  creatorId: userId,
+                  title: state.aiResponse.eventTitleTokenized ?? '새 일정',
+                  description: state.aiResponse.intent == 'RESCHEDULE'
+                      ? 'AI가 수정한 일정'
+                      : 'AI가 생성한 일정',
+                  location: state.aiResponse.locationTokenized ?? '',
+                  startTime:
+                      state.aiResponse.startTime ?? DateTime.now(),
+                  endTime: state.aiResponse.endTime ??
+                      DateTime.now().add(const Duration(hours: 1)),
+                  visibility: EventVisibility.public,
+                  isOfflineCreated: true,
+                );
+                context
+                    .read<NlpInputBloc>()
+                    .add(NlpEventConfirmed(event));
+                Navigator.of(context).pop();
+              },
+              onEdit: () {
+                Navigator.of(context).pop();
+                context.push('/event/edit', extra: state.aiResponse);
+              },
+            ),
+          ),
+        if (state is NlpResponseReady &&
+            state.aiResponse.intent == 'CANCEL')
+          _SlideUpFadeIn(
+            child: EventCancelCard(
+              aiResponse: state.aiResponse,
+              onConfirmCancel: () {
+                context.read<NlpInputBloc>().add(
+                      NlpEventCancelled(
+                        state.aiResponse.targetEventId ?? '',
+                        eventTitle:
+                            state.aiResponse.eventTitleTokenized ?? '일정',
+                      ),
+                    );
+                Navigator.of(context).pop();
+              },
+              onDismiss: () {
+                Navigator.of(context).pop();
+              },
+            ),
           ),
         if (state is NlpError && !state.isCircuitOpen)
           Padding(
@@ -431,27 +473,101 @@ class _NlpBottomSheetState extends State<NlpBottomSheet>
               ),
             ),
             const SizedBox(width: 8),
-            Container(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [
-                    colorScheme.primary,
-                    colorScheme.tertiary,
-                  ],
-                ),
-                shape: BoxShape.circle,
-              ),
-              child: IconButton(
-                icon: const Icon(
-                  Icons.arrow_upward_rounded,
-                  color: Colors.white,
-                  size: 22,
-                ),
-                onPressed: () => _sendMessage(_textController.text),
-              ),
+            BlocBuilder<NlpInputBloc, NlpInputState>(
+              builder: (context, state) {
+                final isProcessing = state is NlpProcessing;
+                return AnimatedContainer(
+                  duration: const Duration(milliseconds: 250),
+                  curve: Curves.easeInOut,
+                  decoration: BoxDecoration(
+                    gradient: isProcessing
+                        ? null
+                        : LinearGradient(
+                            colors: [
+                              colorScheme.primary,
+                              colorScheme.tertiary,
+                            ],
+                          ),
+                    color: isProcessing
+                        ? colorScheme.surfaceContainerHighest
+                        : null,
+                    shape: BoxShape.circle,
+                  ),
+                  child: IconButton(
+                    icon: isProcessing
+                        ? SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2.5,
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                colorScheme.primary,
+                              ),
+                            ),
+                          )
+                        : const Icon(
+                            Icons.arrow_upward_rounded,
+                            color: Colors.white,
+                            size: 22,
+                          ),
+                    onPressed: isProcessing
+                        ? null
+                        : () => _sendMessage(_textController.text),
+                  ),
+                );
+              },
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// 슬라이드 업 + 페이드 인 애니메이션으로 카드를 자연스럽게 등장시킨다.
+class _SlideUpFadeIn extends StatefulWidget {
+  final Widget child;
+  const _SlideUpFadeIn({required this.child});
+
+  @override
+  State<_SlideUpFadeIn> createState() => _SlideUpFadeInState();
+}
+
+class _SlideUpFadeInState extends State<_SlideUpFadeIn>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+  late final Animation<Offset> _slide;
+  late final Animation<double> _fade;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 380),
+    );
+    _slide = Tween<Offset>(
+      begin: const Offset(0, 0.15),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(parent: _ctrl, curve: Curves.easeOutCubic));
+    _fade = Tween<double>(begin: 0, end: 1)
+        .animate(CurvedAnimation(parent: _ctrl, curve: Curves.easeOut));
+    _ctrl.forward();
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _fade,
+      child: SlideTransition(
+        position: _slide,
+        child: widget.child,
       ),
     );
   }

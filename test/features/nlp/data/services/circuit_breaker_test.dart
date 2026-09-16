@@ -99,6 +99,45 @@ void main() {
       );
     });
 
+    test(
+      'should still use local fallback after the circuit opens',
+      () async {
+        when(
+          () => mockFunctions.invoke(
+            'nlp-agent-function',
+            body: any(named: 'body'),
+          ),
+        ).thenThrow(Exception('Server Error'));
+
+        final schedulable = createTestCommand(text: '내일 3시 미팅');
+
+        // Two API failures still count toward opening the circuit,
+        // even though local fallback succeeds.
+        final first = await service.processCommand(schedulable, enableEarlyExit: false);
+        final second = await service.processCommand(schedulable, enableEarlyExit: false);
+        expect(first.intent, 'CREATE_EVENT');
+        expect(second.intent, 'CREATE_EVENT');
+        expect(first.aiReplyMessage, contains('오프라인 모드'));
+
+        reset(mockFunctions);
+        when(() => mockSupabase.functions).thenReturn(mockFunctions);
+
+        // Third call must not throw: offline parsing should still work.
+        final third = await service.processCommand(schedulable, enableEarlyExit: false);
+        expect(third.intent, 'CREATE_EVENT');
+        expect(third.eventTitleTokenized, '미팅');
+        expect(third.startTime, isNotNull);
+        expect(third.startTime!.hour, 3);
+
+        verifyNever(
+          () => mockFunctions.invoke(
+            'nlp-agent-function',
+            body: any(named: 'body'),
+          ),
+        );
+      },
+    );
+
     test('should reset to CLOSED after a successful call', () async {
       // Arrange: First call succeeds
       when(

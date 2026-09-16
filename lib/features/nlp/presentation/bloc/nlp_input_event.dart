@@ -12,4 +12,10 @@ class NlpEventConfirmed extends NlpInputEvent {
   NlpEventConfirmed(this.event);
 }
 
+class NlpEventCancelled extends NlpInputEvent {
+  final String eventId;
+  final String eventTitle;
+  NlpEventCancelled(this.eventId, {this.eventTitle = '일정'});
+}
+
 class NlpMemoryZeroed extends NlpInputEvent {}
