@@ -4,9 +4,9 @@ import 'package:flutter/material.dart';
 /// [isProcessing]이 true이면 "AI가 생각 중..." (점멸 효과),
 /// false이면 "AI 일정 비서" 타이틀을 표시한다.
 class AnimatedAiStatus extends StatefulWidget {
-  final bool isProcessing;
+  const AnimatedAiStatus({required this.isProcessing, super.key});
 
-  const AnimatedAiStatus({super.key, required this.isProcessing});
+  final bool isProcessing;
 
   @override
   State<AnimatedAiStatus> createState() => _AnimatedAiStatusState();
@@ -24,7 +24,7 @@ class _AnimatedAiStatusState extends State<AnimatedAiStatus>
       vsync: this,
       duration: const Duration(milliseconds: 900),
     )..repeat(reverse: true);
-    _pulseAnim = Tween<double>(begin: 0.4, end: 1.0).animate(
+    _pulseAnim = Tween<double>(begin: 0.4, end: 1).animate(
       CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut),
     );
   }
@@ -88,8 +88,9 @@ class _AnimatedAiStatusState extends State<AnimatedAiStatus>
 
 /// 말 줄임표(...)가 순차적으로 나타나는 미니 애니메이션 위젯
 class _AnimatedEllipsis extends StatefulWidget {
-  final Color color;
   const _AnimatedEllipsis({required this.color});
+
+  final Color color;
 
   @override
   State<_AnimatedEllipsis> createState() => _AnimatedEllipsisState();
@@ -106,17 +107,16 @@ class _AnimatedEllipsisState extends State<_AnimatedEllipsis>
     _ctrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 500),
-    );
-    _ctrl.addStatusListener((status) {
-      if (status == AnimationStatus.completed) {
-        if (mounted) {
-          setState(() {
-            _dotCount = (_dotCount % 3) + 1;
-          });
-          _ctrl.forward(from: 0);
+    )..addStatusListener((status) {
+        if (status == AnimationStatus.completed) {
+          if (mounted) {
+            setState(() {
+              _dotCount = (_dotCount % 3) + 1;
+            });
+            _ctrl.forward(from: 0);
+          }
         }
-      }
-    });
+      });
     _ctrl.forward();
   }
 

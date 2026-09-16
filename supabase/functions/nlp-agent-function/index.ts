@@ -292,6 +292,62 @@ async function callGeminiWithTimeout(
   }
 }
 
+/**
+ * Streams Gemini response as SSE (Server-Sent Events).
+ * data: {"type":"token","chunk":"..."}  — 실시간 토큰 청크
+ * data: {"type":"final","payload":{...}} — 최종 JSON 페이로드
+ */
+async function callGeminiStreaming(
+  ai: GoogleGenAI,
+  modelId: string,
+  contents: any,
+  systemInstruction: string,
+): Promise<ReadableStream<Uint8Array>> {
+  const encoder = new TextEncoder()
+
+  return new ReadableStream({
+    async start(controller) {
+      try {
+        const stream = await ai.models.generateContentStream({
+          model: modelId,
+          contents: contents,
+          config: {
+            systemInstruction: systemInstruction,
+            responseMimeType: 'application/json',
+            responseSchema: responseSchema,
+          },
+        })
+
+        let fullText = ''
+        for await (const chunk of stream) {
+          const chunkText = chunk.text ?? ''
+          if (chunkText) {
+            fullText += chunkText
+            const sseChunk = `data: ${JSON.stringify({ type: 'token', chunk: chunkText })}\n\n`
+            controller.enqueue(encoder.encode(sseChunk))
+          }
+        }
+
+        // 스트리밍 완료 후 최종 JSON 파싱하여 payload로 전송
+        try {
+          const finalPayload = JSON.parse(fullText)
+          const sseFinal = `data: ${JSON.stringify({ type: 'final', payload: finalPayload })}\n\n`
+          controller.enqueue(encoder.encode(sseFinal))
+        } catch {
+          const sseFinal = `data: ${JSON.stringify({ type: 'final', payload: { aiReplyMessage: fullText, intent: 'QUERY', participantsTokenized: [], conflicts: [] } })}\n\n`
+          controller.enqueue(encoder.encode(sseFinal))
+        }
+
+        controller.close()
+      } catch (err: any) {
+        const sseErr = `data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`
+        controller.enqueue(encoder.encode(sseErr))
+        controller.close()
+      }
+    },
+  })
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders })
@@ -328,6 +384,10 @@ serve(async (req) => {
         status: 400,
       })
     }
+
+    // 스트리밍 모드 여부 확인 (?streaming=true)
+    const url = new URL(req.url)
+    const isStreaming = url.searchParams.get('streaming') === 'true'
 
     // 1. RAG Context (Existing calendar events ±7d)
     const { contextText, eventCount } = await fetchCalendarContext(supabaseClient, user.id)
@@ -451,6 +511,24 @@ ${contextText || '\n[No existing events found]'}`
     const totalDurationMs = Date.now() - reqStart
     console.log(`[Router] Total request completed in ${totalDurationMs}ms | Model=${modelUsed} | Decision=${routerDecision}`)
 
+    // ── 스트리밍 모드: SSE 응답 ──────────────────────────────────────────────
+    if (isStreaming) {
+      const sseStream = await callGeminiStreaming(ai, modelUsed, contents, systemInstruction)
+      return new Response(sseStream, {
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'X-FlowSync-Router-Decision': routerDecision,
+          'X-FlowSync-Model-Used': modelUsed,
+          'X-FlowSync-Latency-Ms': totalDurationMs.toString(),
+          'X-FlowSync-Streaming': 'true',
+        },
+        status: 200,
+      })
+    }
+
+    // ── 기존 JSON 모드 (하위 호환 유지) ────────────────────────────────────
     return new Response(JSON.stringify(finalResponse), {
       headers: {
         ...corsHeaders,

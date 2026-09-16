@@ -110,4 +110,30 @@ class AiSchedulingResponse {
       conflicts: conflicts,
     );
   }
+
+  /// Returns a new [AiSchedulingResponse] with selected fields overridden.
+  AiSchedulingResponse copyWith({
+    String? intent,
+    String? targetEventId,
+    String? eventTitleTokenized,
+    String? locationTokenized,
+    DateTime? startTime,
+    DateTime? endTime,
+    List<String>? participantsTokenized,
+    String? aiReplyMessage,
+    List<ScheduleConflict>? conflicts,
+  }) {
+    return AiSchedulingResponse(
+      intent: intent ?? this.intent,
+      targetEventId: targetEventId ?? this.targetEventId,
+      eventTitleTokenized: eventTitleTokenized ?? this.eventTitleTokenized,
+      locationTokenized: locationTokenized ?? this.locationTokenized,
+      startTime: startTime ?? this.startTime,
+      endTime: endTime ?? this.endTime,
+      participantsTokenized:
+          participantsTokenized ?? this.participantsTokenized,
+      aiReplyMessage: aiReplyMessage ?? this.aiReplyMessage,
+      conflicts: conflicts ?? this.conflicts,
+    );
+  }
 }

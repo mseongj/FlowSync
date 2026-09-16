@@ -65,4 +65,8 @@ app.*.map.json
 # AI-DLC & Agent Rules
 .aidlc/
 .agent/
+.agent_cache/
 aidlc-docs/
+
+# local AI Model files
+assets/models/

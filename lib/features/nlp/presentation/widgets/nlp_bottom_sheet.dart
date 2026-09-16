@@ -1,20 +1,19 @@
 import 'dart:ui';
 
-import 'package:flow_sync/features/nlp/presentation/widgets/animated_ai_status.dart';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
 
+import 'package:flow_sync/features/family/presentation/bloc/family_bloc.dart';
 import 'package:flow_sync/features/nlp/presentation/bloc/nlp_input_bloc.dart';
 import 'package:flow_sync/features/nlp/presentation/bloc/nlp_input_event.dart';
 import 'package:flow_sync/features/nlp/presentation/bloc/nlp_input_state.dart';
+import 'package:flow_sync/features/nlp/presentation/widgets/animated_ai_status.dart';
 import 'package:flow_sync/features/nlp/presentation/widgets/chat_history_list.dart';
 import 'package:flow_sync/features/nlp/presentation/widgets/event_preview_card.dart';
-import 'package:flow_sync/features/family/presentation/bloc/family_bloc.dart';
 import 'package:flow_sync/features/schedule/domain/entities/calendar_event.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 class NlpBottomSheet extends StatefulWidget {
   const NlpBottomSheet({super.key});
@@ -200,7 +199,7 @@ class _NlpBottomSheetState extends State<NlpBottomSheet>
     ColorScheme colorScheme,
   ) {
     // Determine chat messages from state
-    List<dynamic> chatHistory = [];
+    var chatHistory = <dynamic>[];
     if (state is NlpInitial) {
       chatHistory = state.chatHistory;
     } else if (state is NlpProcessing) {
@@ -526,8 +525,9 @@ class _NlpBottomSheetState extends State<NlpBottomSheet>
 
 /// 슬라이드 업 + 페이드 인 애니메이션으로 카드를 자연스럽게 등장시킨다.
 class _SlideUpFadeIn extends StatefulWidget {
-  final Widget child;
   const _SlideUpFadeIn({required this.child});
+
+  final Widget child;
 
   @override
   State<_SlideUpFadeIn> createState() => _SlideUpFadeInState();

@@ -1,8 +1,14 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:injectable/injectable.dart';
-import '../../domain/entities/nlp_command.dart';
-import '../../domain/entities/ai_scheduling_response.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+
+import 'package:flow_sync/core/privacy/differential_privacy_service.dart';
+import 'package:flow_sync/core/privacy/dp_icl_consensus.dart';
+import 'package:flow_sync/features/nlp/domain/entities/ai_scheduling_response.dart';
+import 'package:flow_sync/features/nlp/domain/entities/nlp_command.dart';
+import 'package:flow_sync/features/nlp/domain/entities/nlp_stream_chunk.dart';
 
 class CircuitOpenException implements Exception {
   final String message;
@@ -232,11 +238,20 @@ class AiOrchestrationService {
     // ── 0. Local Early-Exit for Simple Utterances (0ms Latency) ─────
     if (enableEarlyExit &&
         canLocalEarlyExit(command, chatHistory: chatHistory)) {
-      final earlyExitResponse = _tryLocalFallback(command, isEarlyExit: true);
-      if (earlyExitResponse != null) {
-        debugPrint('⚡ [Local Early-Exit] 로컬 엔진 즉시 생성: "${command.rawText}"');
-        return earlyExitResponse;
+      // DP-ICL Noisy Consensus: k=3 서브셋으로 환각 여부 검증
+      final consensusResult = DpIclConsensus.runConsensus(
+        command,
+        (subset) => _tryLocalFallback(subset),
+      );
+
+      if (consensusResult != null) {
+        // 합의 통과 → Laplace 시간 노이즈 주입
+        final noisedResponse = _applyDpNoise(consensusResult);
+        debugPrint('⚡ [Local Early-Exit + DP] 로컬 엔진 즉시 생성: "${command.rawText}"');
+        return noisedResponse;
       }
+      // 합의 실패(τ_dp 미만) → Cloud 경유 (Early-Exit 포기)
+      debugPrint('🔒 [DP-ICL] 합의 불충분 → Cloud 경유');
     }
 
     // ── 1. Cloud Execution via Circuit Breaker ──────────────────────
@@ -257,7 +272,8 @@ class AiOrchestrationService {
         final data = response.data as Map<String, dynamic>;
 
         _recordSuccess();
-        return AiSchedulingResponse.fromJson(data);
+        // Cloud 응답에도 DP 시간 노이즈 주입
+        return _applyDpNoise(AiSchedulingResponse.fromJson(data));
       } catch (e) {
         _recordFailure();
 
@@ -278,6 +294,118 @@ class AiOrchestrationService {
 
     throw CircuitOpenException();
   }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // DP 노이즈 적용 헬퍼
+  // ──────────────────────────────────────────────────────────────────────
+
+  /// [AiSchedulingResponse]의 startTime / endTime에 Laplace 노이즈를 가산.
+  /// QUERY, CANCEL intent는 시간 필드가 없으므로 그대로 반환.
+  AiSchedulingResponse _applyDpNoise(AiSchedulingResponse response) {
+    if (response.startTime == null) return response;
+
+    final (noisedStart, noisedEnd) =
+        DifferentialPrivacyService.injectEventTimeNoise(
+      response.startTime!,
+      response.endTime ?? response.startTime!.add(const Duration(hours: 1)),
+    );
+
+    // 과거 방지 가드
+    final guardedStart = DifferentialPrivacyService.guardAgainstPast(
+      noisedStart,
+      response.startTime!,
+    );
+
+    debugPrint(
+      '🔒 [DP] 시간 노이즈 주입: ${response.startTime} → $guardedStart (Δ: '
+      '${guardedStart.difference(response.startTime!).inMinutes}분)',
+    );
+
+    return response.copyWith(
+      startTime: guardedStart,
+      endTime: noisedEnd,
+    );
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // SSE 스트리밍 수신
+  // ──────────────────────────────────────────────────────────────────────
+
+  /// Edge Function SSE 스트리밍을 구독하여 [NlpStreamChunk] 시퀀스를 yield.
+  ///
+  /// - 토큰 청크 수신 시 [NlpTokenChunk] yield → 채팅 버블 실시간 갱신
+  /// - 최종 페이로드 수신 시 [NlpFinalChunk] yield → [AiSchedulingResponse] 파싱
+  Stream<NlpStreamChunk> processCommandStream(
+    NlpCommand command, {
+    List<Map<String, String>> chatHistory = const [],
+  }) async* {
+    if (_isCircuitOpen()) {
+      throw CircuitOpenException();
+    }
+
+    try {
+      final request = await _supabase.functions.invoke(
+        'nlp-agent-function',
+        body: {
+          'text': command.tokenizedText,
+          if (chatHistory.isNotEmpty) 'chatHistory': chatHistory,
+        },
+        headers: {'X-FlowSync-Streaming': 'true'},
+        method: HttpMethod.post,
+        queryParameters: {'streaming': 'true'},
+      );
+
+      // Supabase invoke는 SSE를 직접 스트리밍 지원하지 않으므로
+      // 단일 응답에서 SSE 라인을 파싱하는 방식으로 처리
+      final rawData = request.data;
+      if (rawData is String) {
+        yield* _parseSseLines(rawData);
+      } else if (rawData is Map<String, dynamic>) {
+        // JSON 폴백 (스트리밍 미지원 환경)
+        yield NlpFinalChunk(
+          _applyDpNoise(AiSchedulingResponse.fromJson(rawData)),
+        );
+      }
+
+      _recordSuccess();
+    } catch (e) {
+      _recordFailure();
+      rethrow;
+    }
+  }
+
+  /// SSE 형식의 raw 문자열에서 [NlpStreamChunk]를 파싱.
+  Stream<NlpStreamChunk> _parseSseLines(String raw) async* {
+    final lines = raw.split('\n');
+    for (final line in lines) {
+      if (!line.startsWith('data: ')) continue;
+      final jsonStr = line.substring(6).trim();
+      if (jsonStr.isEmpty) continue;
+
+      try {
+        final json = Map<String, dynamic>.from(
+          jsonDecode(jsonStr) as Map<String, dynamic>,
+        );
+        final type = json['type'] as String?;
+
+        if (type == 'token') {
+          yield NlpTokenChunk(json['chunk'] as String? ?? '');
+        } else if (type == 'final') {
+          final payload = json['payload'] as Map<String, dynamic>?;
+          if (payload != null) {
+            yield NlpFinalChunk(
+              _applyDpNoise(AiSchedulingResponse.fromJson(payload)),
+            );
+          }
+        } else if (type == 'error') {
+          throw Exception(json['message'] as String? ?? 'SSE stream error');
+        }
+      } catch (_) {
+        // 개별 라인 파싱 실패는 무시
+      }
+    }
+  }
+
 
   /// Local fallback NLP: parses simple scheduling patterns offline
   /// or provides instant Local Early-Exit.

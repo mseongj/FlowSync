@@ -1,14 +1,13 @@
 import 'package:flutter_bloc/flutter_bloc.dart';
-import 'package:uuid/uuid.dart';
 import 'package:injectable/injectable.dart';
-import 'nlp_input_event.dart';
-import 'nlp_input_state.dart';
-import '../../data/services/ai_orchestration_service.dart';
-import '../../domain/entities/chat_message.dart';
-import '../../domain/entities/nlp_command.dart';
-import '../../../schedule/domain/entities/calendar_event.dart';
-import '../../../../core/database/local_database_service.dart';
-import '../../../../core/background/sync_queue_manager.dart';
+import 'package:uuid/uuid.dart';
+
+import 'package:flow_sync/core/background/sync_queue_manager.dart';
+import 'package:flow_sync/core/database/local_database_service.dart';
+import 'package:flow_sync/features/nlp/data/services/ai_orchestration_service.dart';
+import 'package:flow_sync/features/nlp/domain/entities/chat_message.dart';
+import 'package:flow_sync/features/nlp/presentation/bloc/nlp_input_event.dart';
+import 'package:flow_sync/features/nlp/presentation/bloc/nlp_input_state.dart';
 
 @injectable
 class NlpInputBloc extends Bloc<NlpInputEvent, NlpInputState> {
