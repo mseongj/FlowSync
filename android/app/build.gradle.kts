@@ -28,6 +28,20 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        // ── NDK CMake 설정 (llama.cpp FFI 빌드) ──────────────────────────
+        ndk {
+            // arm64-v8a: 최신 Android 기기 (NEON 가속 지원)
+            // x86_64: Android 에뮬레이터
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/jni/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     buildTypes {

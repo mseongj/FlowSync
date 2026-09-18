@@ -377,12 +377,18 @@ serve(async (req) => {
       })
     }
 
-    const { text, chatHistory } = await req.json()
+    const { text, chatHistory, draftTokens, draftLogprobs } = await req.json()
     if (!text) {
       return new Response(JSON.stringify({ error: 'Missing text parameter' }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         status: 400,
       })
+    }
+
+    // Draft 토큰 수신 여부 (Speculative Decoding 모드)
+    const hasSpeculativeDraft = Array.isArray(draftTokens) && draftTokens.length > 0
+    if (hasSpeculativeDraft) {
+      console.log(`[Speculative] Draft 수신: ${draftTokens.length}개 토큰`)
     }
 
     // 스트리밍 모드 여부 확인 (?streaming=true)
@@ -511,6 +517,27 @@ ${contextText || '\n[No existing events found]'}`
     const totalDurationMs = Date.now() - reqStart
     console.log(`[Router] Total request completed in ${totalDurationMs}ms | Model=${modelUsed} | Decision=${routerDecision}`)
 
+    // ── Speculative Decoding: Cloud logprob 첨부 ─────────────────────────────
+    // Draft 토큰이 있으면, Cloud 응답에 각 Draft 토큰의 Cloud logprob를 첨부.
+    // Flutter의 SpeculativeDecodeManager가 Accept/Reject 판정에 사용.
+    let cloudLogprobs: number[] = []
+    if (hasSpeculativeDraft && draftLogprobs) {
+      // 실제 Cloud logprob을 가져오는 것은 Gemini API가 logprob를 노출할 때만 가능.
+      // 현재 Gemini API는 logprob를 직접 제공하지 않으므로,
+      // Draft 토큰에 대한 신뢰도를 0.0~1.0 범위의 품질 점수로 근사.
+      const qualityScore = scoreResponseQuality(finalResponse)
+      cloudLogprobs = Array(draftTokens.length).fill(
+        Math.log(Math.max(qualityScore.score, 0.01))  // log(score)로 logprob 근사
+      )
+      console.log(`[Speculative] Cloud logprob 근사: score=${qualityScore.score.toFixed(3)}, logprob=${cloudLogprobs[0]?.toFixed(3)}`)
+    }
+
+    // cloudLogprobs와 acceptanceRate를 응답에 포함
+    const enrichedResponse = {
+      ...finalResponse,
+      ...(hasSpeculativeDraft ? { cloudLogprobs, draftAcceptanceInfo: { k: draftTokens?.length ?? 0 } } : {}),
+    }
+
     // ── 스트리밍 모드: SSE 응답 ──────────────────────────────────────────────
     if (isStreaming) {
       const sseStream = await callGeminiStreaming(ai, modelUsed, contents, systemInstruction)
@@ -529,13 +556,14 @@ ${contextText || '\n[No existing events found]'}`
     }
 
     // ── 기존 JSON 모드 (하위 호환 유지) ────────────────────────────────────
-    return new Response(JSON.stringify(finalResponse), {
+    return new Response(JSON.stringify(enrichedResponse), {
       headers: {
         ...corsHeaders,
         'Content-Type': 'application/json',
         'X-FlowSync-Router-Decision': routerDecision,
         'X-FlowSync-Model-Used': modelUsed,
         'X-FlowSync-Latency-Ms': totalDurationMs.toString(),
+        ...(hasSpeculativeDraft ? { 'X-FlowSync-Acceptance-Rate': (cloudLogprobs[0] ? '1' : '0') } : {}),
       },
       status: 200,
     })

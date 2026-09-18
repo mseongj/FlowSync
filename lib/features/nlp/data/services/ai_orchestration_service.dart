@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:injectable/injectable.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'package:flow_sync/core/llm/llama_ffi_service.dart';
+import 'package:flow_sync/core/llm/speculative_decode_manager.dart';
 import 'package:flow_sync/core/privacy/differential_privacy_service.dart';
 import 'package:flow_sync/core/privacy/dp_icl_consensus.dart';
 import 'package:flow_sync/features/nlp/domain/entities/ai_scheduling_response.dart';
@@ -22,6 +24,7 @@ enum CircuitState { closed, open, halfOpen }
 @lazySingleton
 class AiOrchestrationService {
   final SupabaseClient _supabase;
+  final LlamaFfiService _llama;
 
   // Circuit Breaker State
   CircuitState _circuitState = CircuitState.closed;
@@ -31,7 +34,7 @@ class AiOrchestrationService {
   final int _maxFailures = 2;
   final Duration _cooldownPeriod = const Duration(minutes: 5);
 
-  AiOrchestrationService(this._supabase);
+  AiOrchestrationService(this._supabase, this._llama);
 
   // ── Korean non-name words (scheduling vocabulary) ──────────────────
   static final _koreanNonNames = {
@@ -257,12 +260,23 @@ class AiOrchestrationService {
     // ── 1. Cloud Execution via Circuit Breaker ──────────────────────
     if (!_isCircuitOpen()) {
       try {
+        // Speculative Decoding: Draft 토큰 생성 시도
+        LlamaDraftResult? draft;
+        if (_llama.isLoaded) {
+          draft = _llama.generateDraft(command.tokenizedText);
+        }
+
+        final body = <String, dynamic>{
+          'text': command.tokenizedText,
+          if (chatHistory.isNotEmpty) 'chatHistory': chatHistory,
+          // Draft가 있으면 Edge Function에 전송
+          if (draft != null)
+            ...SpeculativeDecodeManager.serializeDraft(draft),
+        };
+
         final response = await _supabase.functions.invoke(
           'nlp-agent-function',
-          body: {
-            'text': command.tokenizedText,
-            if (chatHistory.isNotEmpty) 'chatHistory': chatHistory,
-          },
+          body: body,
         );
 
         if (response.status >= 400) {
@@ -270,6 +284,17 @@ class AiOrchestrationService {
         }
 
         final data = response.data as Map<String, dynamic>;
+
+        // Speculative Decoding: Draft가 있으면 Accept/Reject 판정
+        if (draft != null) {
+          final cloudLogprobs =
+              SpeculativeDecodeManager.extractCloudLogprobs(data);
+          final result = SpeculativeDecodeManager.evaluate(
+            draftResult: draft,
+            cloudLogprobs: cloudLogprobs,
+          );
+          debugPrint('📊 [Speculative] $result');
+        }
 
         _recordSuccess();
         // Cloud 응답에도 DP 시간 노이즈 주입
