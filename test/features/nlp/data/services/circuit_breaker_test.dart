@@ -1,24 +1,28 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:flow_sync/core/llm/llama_ffi_service.dart';
 import 'package:flow_sync/features/nlp/data/services/ai_orchestration_service.dart';
 import 'package:flow_sync/features/nlp/domain/entities/nlp_command.dart';
 
 // Mocks
 class MockSupabaseClient extends Mock implements SupabaseClient {}
-
 class MockFunctionsClient extends Mock implements FunctionsClient {}
+class MockLlamaFfiService extends Mock implements LlamaFfiService {}
 
 void main() {
   late AiOrchestrationService service;
   late MockSupabaseClient mockSupabase;
   late MockFunctionsClient mockFunctions;
+  late MockLlamaFfiService mockLlama;
 
   setUp(() {
     mockSupabase = MockSupabaseClient();
     mockFunctions = MockFunctionsClient();
+    mockLlama = MockLlamaFfiService();
     when(() => mockSupabase.functions).thenReturn(mockFunctions);
-    service = AiOrchestrationService(mockSupabase);
+    when(() => mockLlama.isLoaded).thenReturn(false);
+    service = AiOrchestrationService(mockSupabase, mockLlama);
   });
 
   NlpCommand createTestCommand({String text = 'test'}) {
@@ -181,7 +185,7 @@ void main() {
         );
 
         // A fresh service starts in CLOSED state
-        final freshService = AiOrchestrationService(mockSupabase);
+        final freshService = AiOrchestrationService(mockSupabase, mockLlama);
         final command = createTestCommand();
         final response = await freshService.processCommand(command);
 

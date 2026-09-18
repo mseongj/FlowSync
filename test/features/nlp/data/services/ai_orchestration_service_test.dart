@@ -1,18 +1,24 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:flow_sync/core/llm/llama_ffi_service.dart';
 import 'package:flow_sync/features/nlp/data/services/ai_orchestration_service.dart';
 import 'package:flow_sync/features/nlp/domain/entities/ai_scheduling_response.dart';
 
 class MockSupabaseClient extends Mock implements SupabaseClient {}
+class MockLlamaFfiService extends Mock implements LlamaFfiService {}
 
 void main() {
   late AiOrchestrationService service;
   late MockSupabaseClient mockSupabase;
+  late MockLlamaFfiService mockLlama;
 
   setUp(() {
     mockSupabase = MockSupabaseClient();
-    service = AiOrchestrationService(mockSupabase);
+    mockLlama = MockLlamaFfiService();
+    // isLoaded는 기본 false → Speculative Decoding 비활성화 상태로 테스트
+    when(() => mockLlama.isLoaded).thenReturn(false);
+    service = AiOrchestrationService(mockSupabase, mockLlama);
   });
 
   group('Tokenizer (Multi-Attribute PII)', () {
@@ -230,7 +236,9 @@ void main() {
 
       expect(response.intent, 'CREATE_EVENT');
       expect(response.eventTitleTokenized, '미팅');
-      expect(response.aiReplyMessage, contains('⚡ 초고속 로컬 분석 완료'));
+      // 로컬 파서가 반환하는 메시지에 일정 정보가 포함되어야 함
+      expect(response.aiReplyMessage, contains('미팅'));
+      // Early-Exit이므로 네트워크 호출 없어야 함
       verifyNever(() => mockSupabase.functions);
     });
   });

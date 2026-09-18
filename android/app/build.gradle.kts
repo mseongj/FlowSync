@@ -1,14 +1,15 @@
 plugins {
     id("com.android.application")
-    id("kotlin-android")
-    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
+    // kotlin-android는 Flutter Built-in Kotlin이 자동 관리
+    // (명시적 선언 시 빌드 경고 발생 → 제거)
     id("dev.flutter.flutter-gradle-plugin")
 }
 
 android {
     namespace = "com.example.my_first_app"
     compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
+    // flutter.ndkVersion은 25.x를 가리키지만 설치된 NDK가 없음 → 실제 설치 버전으로 고정
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
