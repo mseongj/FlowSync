@@ -1,7 +1,7 @@
 /**
  * llama_bridge.cpp
  *
- * FlowSync ↔ llama.cpp Flutter FFI 브릿지.
+ * FlowSync <-> llama.cpp Flutter FFI 브릿지.
  * Flutter의 dart:ffi에서 호출하는 C 함수들을 정의합니다.
  *
  * 기능:
@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdint>
+#include <vector>
 #include <android/log.h>
 
 // llama.cpp 공개 헤더
@@ -39,10 +40,12 @@ extern "C" {
 int32_t llama_flutter_load(const char* model_path, int32_t n_ctx) {
     if (g_model != nullptr) {
         LOGI("Model already loaded. Unloading previous model first.");
-        llama_free(g_ctx);
-        llama_free_model(g_model);
+        if (g_ctx != nullptr) {
+            llama_free(g_ctx);
+            g_ctx = nullptr;
+        }
+        llama_model_free(g_model);
         g_model = nullptr;
-        g_ctx   = nullptr;
     }
 
     LOGI("Loading model from: %s", model_path);
@@ -51,21 +54,21 @@ int32_t llama_flutter_load(const char* model_path, int32_t n_ctx) {
     // GPU 레이어 오프로드 비활성화 (모바일에서 CPU 전용)
     model_params.n_gpu_layers = 0;
 
-    g_model = llama_load_model_from_file(model_path, model_params);
+    g_model = llama_model_load_from_file(model_path, model_params);
     if (g_model == nullptr) {
         LOGE("Failed to load model from: %s", model_path);
         return -1;
     }
 
     llama_context_params ctx_params = llama_context_default_params();
-    ctx_params.n_ctx    = static_cast<uint32_t>(n_ctx);
-    ctx_params.n_batch  = 512;
+    ctx_params.n_ctx     = static_cast<uint32_t>(n_ctx);
+    ctx_params.n_batch   = 512;
     ctx_params.n_threads = 4;  // ARM 코어 4개 활용
 
-    g_ctx = llama_new_context_with_model(g_model, ctx_params);
+    g_ctx = llama_init_from_model(g_model, ctx_params);
     if (g_ctx == nullptr) {
         LOGE("Failed to create context.");
-        llama_free_model(g_model);
+        llama_model_free(g_model);
         g_model = nullptr;
         return -1;
     }
@@ -81,7 +84,7 @@ int32_t llama_flutter_load(const char* model_path, int32_t n_ctx) {
  */
 void llama_flutter_free() {
     if (g_ctx   != nullptr) { llama_free(g_ctx);        g_ctx   = nullptr; }
-    if (g_model != nullptr) { llama_free_model(g_model); g_model = nullptr; }
+    if (g_model != nullptr) { llama_model_free(g_model); g_model = nullptr; }
     LOGI("Model freed.");
 }
 
@@ -106,11 +109,17 @@ int32_t llama_flutter_draft(
         return -1;
     }
 
+    const struct llama_vocab* vocab = llama_model_get_vocab(g_model);
+    if (vocab == nullptr) {
+        LOGE("Failed to get vocab from model.");
+        return -1;
+    }
+
     // 프롬프트 토크나이즈
     const int max_tokens = 1024;
     std::vector<llama_token> input_tokens(max_tokens);
     int n_input = llama_tokenize(
-        g_model,
+        vocab,
         prompt,
         static_cast<int32_t>(strlen(prompt)),
         input_tokens.data(),
@@ -125,8 +134,8 @@ int32_t llama_flutter_draft(
     }
     input_tokens.resize(n_input);
 
-    // 컨텍스트 초기화
-    llama_kv_cache_clear(g_ctx);
+    // 컨텍스트/메모리 초기화
+    llama_memory_clear(llama_get_memory(g_ctx), true);
 
     // 입력 배치 처리
     llama_batch batch = llama_batch_get_one(input_tokens.data(), n_input);
@@ -137,10 +146,15 @@ int32_t llama_flutter_draft(
 
     // k개 Draft 토큰 그리디 샘플링
     int generated = 0;
+    const int n_vocab = llama_vocab_n_tokens(vocab);
+
     for (int i = 0; i < k; ++i) {
         // 로짓에서 greedy 샘플링 (argmax)
-        const int n_vocab = llama_n_vocab(g_model);
         float* logits = llama_get_logits_ith(g_ctx, -1);
+        if (logits == nullptr) {
+            LOGE("Failed to get logits.");
+            break;
+        }
 
         // Argmax 탐색
         llama_token best_token = 0;
@@ -156,7 +170,7 @@ int32_t llama_flutter_draft(
         out_logprobs[i] = best_logit;  // 실제 log-prob 아닌 raw logit (근사)
 
         // EOS 토큰이면 조기 종료
-        if (llama_token_is_eog(g_model, best_token)) {
+        if (llama_vocab_is_eog(vocab, best_token)) {
             generated = i + 1;
             break;
         }

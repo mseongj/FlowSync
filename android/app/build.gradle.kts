@@ -16,8 +16,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17.toString()
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        }
     }
 
     defaultConfig {
@@ -32,9 +34,14 @@ android {
 
         // ── NDK CMake 설정 (llama.cpp FFI 빌드) ──────────────────────────
         ndk {
-            // arm64-v8a: 최신 Android 기기 (NEON 가속 지원)
-            // x86_64: Android 에뮬레이터
-            abiFilters += listOf("arm64-v8a", "x86_64")
+            abiFilters.clear()
+            abiFilters.addAll(listOf("arm64-v8a", "x86_64"))
+        }
+
+        externalNativeBuild {
+            cmake {
+                abiFilters.addAll(listOf("arm64-v8a", "x86_64"))
+            }
         }
     }
 
