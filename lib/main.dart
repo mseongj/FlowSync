@@ -17,6 +17,7 @@ import 'package:flow_sync/features/auth/domain/entities/auth_user.dart';
 import 'package:flow_sync/features/family/presentation/bloc/family_bloc.dart';
 import 'package:flow_sync/features/auth/presentation/widgets/app_lifecycle_observer.dart';
 import 'package:flow_sync/features/family/presentation/widgets/deep_link_handler.dart';
+import 'package:flow_sync/core/llm/llama_ffi_service.dart';
 import 'package:flow_sync/features/nlp/presentation/bloc/nlp_input_bloc.dart';
 import 'package:flow_sync/features/schedule/presentation/bloc/schedule_bloc.dart';
 
@@ -80,6 +81,24 @@ class _AppInitializerState extends State<AppInitializer> {
         await getIt<OfflineSyncQueueManager>().initialize();
       } catch (e) {
         debugPrint('⚠️ Workmanager init failed: $e');
+      }
+
+      // 6. LlamaFfi 라이브러리 초기화 (FFI 심볼 바인딩)
+      //    모델 파일 로드는 앱 시작 후 백그라운드에서 비동기 실행
+      //    (700MB+ 로드가 UI를 블록하지 않도록)
+      try {
+        final llamaService = getIt<LlamaFfiService>();
+        llamaService.initialize();
+        // 백그라운드에서 모델 로드 시작 (await 하지 않음)
+        llamaService.loadModel().then((success) {
+          debugPrint(
+            success
+              ? '🦙 [Llama] 모델 백그라운드 로드 완료'
+              : '🦙 [Llama] 모델 로드 실패 (GGUF 파일 없음 — Speculative Decoding 비활성화)',
+          );
+        });
+      } catch (e) {
+        debugPrint('⚠️ LlamaFfi init failed (non-Android 또는 GGUF 없음): $e');
       }
     } catch (e, st) {
       debugPrint('🚨 CRITICAL INIT ERROR: $e');

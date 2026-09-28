@@ -30,7 +30,7 @@ class LlamaFfiService {
   bool _initialized = false;
 
   /// 모델 파일명 (assets/models/ 에 넣은 GGUF 파일 이름)
-  static const _modelFileName = 'Llama-3.2-1B-Instruct.Q4_K_M.gguf';
+  static const _modelFileName = 'Llama-3.2-1B-Instruct-Q4_K_M.gguf';
 
   /// 컨텍스트 크기 (토큰 수)
   static const _nCtx = 2048;

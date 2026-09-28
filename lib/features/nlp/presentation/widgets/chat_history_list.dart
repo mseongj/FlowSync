@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:intl/intl.dart';
 
 import 'package:flow_sync/features/nlp/domain/entities/chat_message.dart';
+import 'package:flow_sync/features/nlp/presentation/bloc/nlp_input_bloc.dart';
+import 'package:flow_sync/features/nlp/presentation/bloc/nlp_input_state.dart';
 
 class ChatHistoryList extends StatelessWidget {
   final List<ChatMessage> messages;
@@ -23,8 +26,141 @@ class ChatHistoryList extends StatelessWidget {
       itemCount: messages.length,
       itemBuilder: (context, index) {
         final message = messages[messages.length - 1 - index];
+
+        // 스트리밍 버블: NlpStreaming 상태에서 'streaming' id 메시지를
+        // 실시간 텍스트 커서 애니메이션과 함께 렌더링
+        if (message.id == 'streaming') {
+          return BlocBuilder<NlpInputBloc, NlpInputState>(
+            buildWhen: (prev, curr) => curr is NlpStreaming,
+            builder: (context, state) {
+              final partialText = state is NlpStreaming ? state.partialText : message.text;
+              return _StreamingBubble(partialText: partialText);
+            },
+          );
+        }
+
         return _ChatBubble(message: message);
       },
+    );
+  }
+}
+
+/// 실시간 SSE 스트리밍 텍스트를 보여주는 버블 (커서 깜빡임 포함)
+class _StreamingBubble extends StatefulWidget {
+  final String partialText;
+
+  const _StreamingBubble({required this.partialText});
+
+  @override
+  State<_StreamingBubble> createState() => _StreamingBubbleState();
+}
+
+class _StreamingBubbleState extends State<_StreamingBubble>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _cursorController;
+  late final Animation<double> _cursorAnim;
+
+  @override
+  void initState() {
+    super.initState();
+    _cursorController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 500),
+    )..repeat(reverse: true);
+
+    _cursorAnim = Tween<double>(begin: 0, end: 1).animate(_cursorController);
+  }
+
+  @override
+  void dispose() {
+    _cursorController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          // AI 아바타
+          Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [colorScheme.primary, colorScheme.tertiary],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(Icons.auto_awesome, size: 16, color: Colors.white),
+          ),
+          const SizedBox(width: 8),
+          // 스트리밍 텍스트 버블
+          Flexible(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              decoration: BoxDecoration(
+                color: colorScheme.surfaceContainerHighest,
+                borderRadius: const BorderRadius.only(
+                  topLeft: Radius.circular(20),
+                  topRight: Radius.circular(20),
+                  bottomLeft: Radius.circular(4),
+                  bottomRight: Radius.circular(20),
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.06),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: widget.partialText.isEmpty
+                  ? const _TypingIndicator()
+                  : AnimatedBuilder(
+                      animation: _cursorAnim,
+                      builder: (context, _) {
+                        return Text.rich(
+                          TextSpan(
+                            children: [
+                              TextSpan(
+                                text: widget.partialText,
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  height: 1.4,
+                                  color: colorScheme.onSurface,
+                                ),
+                              ),
+                              // 깜빡이는 커서
+                              WidgetSpan(
+                                alignment: PlaceholderAlignment.baseline,
+                                baseline: TextBaseline.alphabetic,
+                                child: Opacity(
+                                  opacity: _cursorAnim.value,
+                                  child: Container(
+                                    width: 2,
+                                    height: 16,
+                                    margin: const EdgeInsets.only(left: 1),
+                                    color: colorScheme.primary,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

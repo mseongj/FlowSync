@@ -137,7 +137,8 @@ class _NlpBottomSheetState extends State<NlpBottomSheet>
                       const SizedBox(width: 12),
                       BlocBuilder<NlpInputBloc, NlpInputState>(
                         builder: (context, state) {
-                          final isProcessing = state is NlpProcessing;
+                          final isProcessing =
+                              state is NlpProcessing || state is NlpStreaming;
                           return AnimatedAiStatus(isProcessing: isProcessing);
                         },
                       ),
@@ -203,6 +204,8 @@ class _NlpBottomSheetState extends State<NlpBottomSheet>
     if (state is NlpInitial) {
       chatHistory = state.chatHistory;
     } else if (state is NlpProcessing) {
+      chatHistory = state.chatHistory;
+    } else if (state is NlpStreaming) {
       chatHistory = state.chatHistory;
     } else if (state is NlpResponseReady) {
       chatHistory = state.chatHistory;

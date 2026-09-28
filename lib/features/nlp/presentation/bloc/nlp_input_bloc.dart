@@ -6,6 +6,7 @@ import 'package:flow_sync/core/background/sync_queue_manager.dart';
 import 'package:flow_sync/core/database/local_database_service.dart';
 import 'package:flow_sync/features/nlp/data/services/ai_orchestration_service.dart';
 import 'package:flow_sync/features/nlp/domain/entities/chat_message.dart';
+import 'package:flow_sync/features/nlp/domain/entities/nlp_stream_chunk.dart';
 import 'package:flow_sync/features/nlp/presentation/bloc/nlp_input_event.dart';
 import 'package:flow_sync/features/nlp/presentation/bloc/nlp_input_state.dart';
 
@@ -101,54 +102,96 @@ class NlpInputBloc extends Bloc<NlpInputEvent, NlpInputState> {
       // 2. Build tokenized chat history for multi-turn context
       final tokenizedHistory = _buildTokenizedHistory();
 
-      // 3. Call Edge Function via Circuit Breaker (with chat history)
-      final response = await _aiService.processCommand(
-        command,
-        chatHistory: tokenizedHistory,
-      );
-
-      // 4. Hydrate all response fields (message, title, location, participants)
-      final hydratedResponse = response.hydrateAll(_ephemeralTokenMap);
-
-      // 5. Update Chat History
+      // ── SSE 스트리밍 모드 ────────────────────────────────────────────────
+      // pending 버블을 스트리밍 버블로 교체
       _chatHistory = _chatHistory.where((m) => m.id != 'pending').toList();
+      // 빈 스트리밍 버블 추가 (실시간 갱신용)
       _chatHistory.add(ChatMessage(
-        id: _uuid.v4(),
-        text: hydratedResponse.aiReplyMessage,
+        id: 'streaming',
+        text: '',
         isUser: false,
         timestamp: DateTime.now(),
+        isPending: false,
       ));
 
-      // 6. Emit appropriate state based on intent
-      if (hydratedResponse.intent == 'QUERY') {
-        // QUERY intent: AI is asking a clarifying question or reporting conflict
-        // If conflicts detected, append a formatted conflict summary
-        if (hydratedResponse.hasConflicts) {
-          final conflictLines = hydratedResponse.conflicts.map((c) {
-            final overlap = c.overlapMinutes != null ? ' (${c.overlapMinutes}분 겹침)' : '';
-            return '  ⚠️ "${c.existingEventTitle}" ${c.existingStartTime ?? ''}~${c.existingEndTime ?? ''}$overlap';
-          }).join('\n');
+      // 3. SSE 스트리밍 구독
+      await emit.forEach<NlpStreamChunk>(
+        _aiService.processCommandStream(command, chatHistory: tokenizedHistory),
+        onData: (chunk) {
+          if (chunk is NlpTokenChunk) {
+            // 스트리밍 버블에 텍스트 점진적 추가
+            final currentStreamingIdx = _chatHistory.indexWhere((m) => m.id == 'streaming');
+            if (currentStreamingIdx != -1) {
+              final currentText = _chatHistory[currentStreamingIdx].text;
+              _chatHistory[currentStreamingIdx] = _chatHistory[currentStreamingIdx].copyWith(
+                text: currentText + chunk.text,
+              );
+            }
+            return NlpStreaming(List.from(_chatHistory), _currentStreamingText());
+          } else if (chunk is NlpFinalChunk) {
+            // 스트리밍 완료 → 최종 응답으로 교체
+            final hydratedResponse = chunk.response.hydrateAll(_ephemeralTokenMap);
 
-          _chatHistory.add(ChatMessage(
-            id: _uuid.v4(),
-            text: '📋 충돌 감지된 기존 일정:\n$conflictLines',
-            isUser: false,
-            timestamp: DateTime.now(),
-          ));
-        }
+            // 스트리밍 버블을 최종 AI 메시지로 교체
+            _chatHistory = _chatHistory.where((m) => m.id != 'streaming').toList();
+            _chatHistory.add(ChatMessage(
+              id: _uuid.v4(),
+              text: hydratedResponse.aiReplyMessage,
+              isUser: false,
+              timestamp: DateTime.now(),
+            ));
 
-        emit(NlpInitial(chatHistory: _chatHistory));
-      } else {
-        emit(NlpResponseReady(_chatHistory, hydratedResponse));
-      }
+            // QUERY vs 일정 응답 분기
+            if (hydratedResponse.intent == 'QUERY') {
+              if (hydratedResponse.hasConflicts) {
+                final conflictLines = hydratedResponse.conflicts.map((c) {
+                  final overlap = c.overlapMinutes != null ? ' (${c.overlapMinutes}분 겹침)' : '';
+                  return '  ⚠️ "${c.existingEventTitle}" ${c.existingStartTime ?? ''}~${c.existingEndTime ?? ''}$overlap';
+                }).join('\n');
+
+                _chatHistory.add(ChatMessage(
+                  id: _uuid.v4(),
+                  text: '📋 충돌 감지된 기존 일정:\n$conflictLines',
+                  isUser: false,
+                  timestamp: DateTime.now(),
+                ));
+              }
+              return NlpInitial(chatHistory: List.from(_chatHistory));
+            } else {
+              _recordSuccess();
+              return NlpResponseReady(List.from(_chatHistory), hydratedResponse);
+            }
+          }
+          // fallback (오류 청크 등)
+          return NlpProcessing(_chatHistory);
+        },
+        onError: (error, stackTrace) {
+          _chatHistory = _chatHistory
+              .where((m) => m.id != 'streaming' && m.id != 'pending')
+              .toList();
+          if (error is CircuitOpenException) {
+            return NlpError(_chatHistory, error.message, isCircuitOpen: true);
+          }
+          return NlpError(_chatHistory, 'An unexpected error occurred.');
+        },
+      );
       
     } on CircuitOpenException catch (e) {
-      _chatHistory = _chatHistory.where((m) => m.id != 'pending').toList();
+      _chatHistory = _chatHistory.where((m) => m.id != 'pending' && m.id != 'streaming').toList();
       emit(NlpError(_chatHistory, e.message, isCircuitOpen: true));
     } catch (e) {
-      _chatHistory = _chatHistory.where((m) => m.id != 'pending').toList();
+      _chatHistory = _chatHistory.where((m) => m.id != 'pending' && m.id != 'streaming').toList();
       emit(NlpError(_chatHistory, 'An unexpected error occurred.'));
     }
+  }
+
+  String _currentStreamingText() {
+    final idx = _chatHistory.indexWhere((m) => m.id == 'streaming');
+    return idx != -1 ? _chatHistory[idx].text : '';
+  }
+
+  void _recordSuccess() {
+    // Circuit Breaker 성공 기록은 AiOrchestrationService 내부에서 처리됨
   }
 
   /// Builds a tokenized version of the chat history for the Edge Function.
@@ -156,7 +199,7 @@ class NlpInputBloc extends Bloc<NlpInputEvent, NlpInputState> {
   List<Map<String, String>> _buildTokenizedHistory() {
     // Only include real messages (not pending, not system confirmations)
     final realMessages = _chatHistory
-        .where((m) => !m.isPending && m.id != 'pending')
+        .where((m) => !m.isPending && m.id != 'pending' && m.id != 'streaming')
         .toList();
 
     // Keep last 10 turns max to avoid payload bloat
