@@ -13,5 +13,5 @@ abstract class RegisterModule {
   SupabaseClient get supabase => Supabase.instance.client;
 
   @lazySingleton
-  FlutterSecureStorage get secureStorage => const FlutterSecureStorage();
+  FlutterSecureStorage get secureStorage => FlutterSecureStorage();
 }
