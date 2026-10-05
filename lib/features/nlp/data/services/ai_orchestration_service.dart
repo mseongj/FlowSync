@@ -358,75 +358,160 @@ class AiOrchestrationService {
 
   /// Edge Function SSE 스트리밍을 구독하여 [NlpStreamChunk] 시퀀스를 yield.
   ///
-  /// - 토큰 청크 수신 시 [NlpTokenChunk] yield → 채팅 버블 실시간 갱신
-  /// - 최종 페이로드 수신 시 [NlpFinalChunk] yield → [AiSchedulingResponse] 파싱
+  /// [processCommand]와 동일한 파이프라인을 스트리밍 형태로 제공:
+  ///   0. Local Early-Exit + DP-ICL 합의 → 네트워크 없이 즉시 [NlpFinalChunk]
+  ///   1. Circuit Open → 오프라인 로컬 파서 폴백
+  ///   2. Llama Draft 생성 → Edge Function에 첨부 (Speculative Decoding)
+  ///   3. SSE 수신: [NlpTokenChunk] → [NlpFinalChunk]
+  ///   4. 최종 응답 수신 전 실패 시 → 로컬 파서 폴백
   Stream<NlpStreamChunk> processCommandStream(
     NlpCommand command, {
     List<Map<String, String>> chatHistory = const [],
+    bool enableEarlyExit = true,
   }) async* {
+    // ── 0. Local Early-Exit + DP-ICL Noisy Consensus ─────────────────
+    if (enableEarlyExit &&
+        canLocalEarlyExit(command, chatHistory: chatHistory)) {
+      final consensusResult = DpIclConsensus.runConsensus(
+        command,
+        (subset) => _tryLocalFallback(subset),
+      );
+      if (consensusResult != null) {
+        debugPrint('⚡ [Stream Early-Exit + DP] 로컬 엔진 즉시 생성: "${command.rawText}"');
+        yield NlpFinalChunk(_applyDpNoise(consensusResult));
+        return;
+      }
+      debugPrint('🔒 [DP-ICL] 합의 불충분 → Cloud 경유');
+    }
+
+    // ── 1. Circuit Open → 오프라인 파서 ──────────────────────────────
     if (_isCircuitOpen()) {
+      final fallback = _tryLocalFallback(command);
+      if (fallback != null) {
+        debugPrint('🔌 [Circuit Open] 로컬 파서 폴백');
+        yield NlpFinalChunk(fallback);
+        return;
+      }
       throw CircuitOpenException();
     }
 
+    // ── 2. Speculative Decoding: Draft 생성 ──────────────────────────
+    final draft = _tryGenerateDraft(command);
+
+    var receivedFinal = false;
     try {
       final request = await _supabase.functions.invoke(
         'nlp-agent-function',
         body: {
           'text': command.tokenizedText,
           if (chatHistory.isNotEmpty) 'chatHistory': chatHistory,
+          if (draft != null) ...SpeculativeDecodeManager.serializeDraft(draft),
         },
         headers: {'X-FlowSync-Streaming': 'true'},
         method: HttpMethod.post,
         queryParameters: {'streaming': 'true'},
       );
 
+      if (request.status >= 400) {
+        throw Exception('Edge function error: ${request.status}');
+      }
+
       // Supabase invoke는 SSE를 직접 스트리밍 지원하지 않으므로
       // 단일 응답에서 SSE 라인을 파싱하는 방식으로 처리
       final rawData = request.data;
       if (rawData is String) {
-        yield* _parseSseLines(rawData);
+        await for (final chunk in _parseSseLines(rawData, draft: draft)) {
+          if (chunk is NlpFinalChunk) receivedFinal = true;
+          yield chunk;
+        }
       } else if (rawData is Map<String, dynamic>) {
         // JSON 폴백 (스트리밍 미지원 환경)
+        _evaluateSpeculative(draft, rawData);
+        receivedFinal = true;
         yield NlpFinalChunk(
           _applyDpNoise(AiSchedulingResponse.fromJson(rawData)),
         );
       }
 
+      if (!receivedFinal) {
+        throw Exception('SSE stream ended without final payload');
+      }
       _recordSuccess();
     } catch (e) {
       _recordFailure();
-      rethrow;
+
+      // 최종 응답을 아직 못 받았다면 로컬 파서로 복구 시도
+      if (!receivedFinal) {
+        final fallback = _tryLocalFallback(command);
+        if (fallback != null) {
+          debugPrint('🛟 [Stream] Cloud 실패 → 로컬 파서 폴백: $e');
+          yield NlpFinalChunk(fallback);
+          return;
+        }
+      }
+      throw CircuitOpenException('API Error: ${e.toString()}');
     }
   }
 
+  /// Llama 모델이 로드되어 있으면 Draft 토큰을 생성. 실패 시 null.
+  LlamaDraftResult? _tryGenerateDraft(NlpCommand command) {
+    try {
+      if (!_llama.isLoaded) return null;
+      return _llama.generateDraft(command.tokenizedText);
+    } catch (e) {
+      debugPrint('🦙 [Speculative] Draft 생성 예외 → 생략: $e');
+      return null;
+    }
+  }
+
+  /// Cloud 응답의 `cloudLogprobs`로 Draft Accept/Reject 판정 (로깅용).
+  void _evaluateSpeculative(LlamaDraftResult? draft, Map<String, dynamic> data) {
+    if (draft == null) return;
+    final cloudLogprobs = SpeculativeDecodeManager.extractCloudLogprobs(data);
+    final result = SpeculativeDecodeManager.evaluate(
+      draftResult: draft,
+      cloudLogprobs: cloudLogprobs,
+    );
+    debugPrint('📊 [Speculative] $result');
+  }
+
   /// SSE 형식의 raw 문자열에서 [NlpStreamChunk]를 파싱.
-  Stream<NlpStreamChunk> _parseSseLines(String raw) async* {
+  ///
+  /// - 잘못된 JSON 라인은 건너뜀
+  /// - `type: error` 라인은 예외로 전파 (상위에서 폴백 처리)
+  Stream<NlpStreamChunk> _parseSseLines(
+    String raw, {
+    LlamaDraftResult? draft,
+  }) async* {
     final lines = raw.split('\n');
     for (final line in lines) {
       if (!line.startsWith('data: ')) continue;
       final jsonStr = line.substring(6).trim();
       if (jsonStr.isEmpty) continue;
 
+      final Map<String, dynamic> json;
       try {
-        final json = Map<String, dynamic>.from(
+        json = Map<String, dynamic>.from(
           jsonDecode(jsonStr) as Map<String, dynamic>,
         );
-        final type = json['type'] as String?;
-
-        if (type == 'token') {
-          yield NlpTokenChunk(json['chunk'] as String? ?? '');
-        } else if (type == 'final') {
-          final payload = json['payload'] as Map<String, dynamic>?;
-          if (payload != null) {
-            yield NlpFinalChunk(
-              _applyDpNoise(AiSchedulingResponse.fromJson(payload)),
-            );
-          }
-        } else if (type == 'error') {
-          throw Exception(json['message'] as String? ?? 'SSE stream error');
-        }
       } catch (_) {
-        // 개별 라인 파싱 실패는 무시
+        // 개별 라인 JSON 파싱 실패는 무시
+        continue;
+      }
+
+      final type = json['type'] as String?;
+      if (type == 'token') {
+        yield NlpTokenChunk(json['chunk'] as String? ?? '');
+      } else if (type == 'final') {
+        final payload = json['payload'];
+        if (payload is Map<String, dynamic>) {
+          _evaluateSpeculative(draft, payload);
+          yield NlpFinalChunk(
+            _applyDpNoise(AiSchedulingResponse.fromJson(payload)),
+          );
+        }
+      } else if (type == 'error') {
+        throw Exception(json['message'] as String? ?? 'SSE stream error');
       }
     }
   }

@@ -302,6 +302,7 @@ async function callGeminiStreaming(
   modelId: string,
   contents: any,
   systemInstruction: string,
+  extraFinalFields: Record<string, unknown> = {},
 ): Promise<ReadableStream<Uint8Array>> {
   const encoder = new TextEncoder()
 
@@ -331,10 +332,10 @@ async function callGeminiStreaming(
         // 스트리밍 완료 후 최종 JSON 파싱하여 payload로 전송
         try {
           const finalPayload = JSON.parse(fullText)
-          const sseFinal = `data: ${JSON.stringify({ type: 'final', payload: finalPayload })}\n\n`
+          const sseFinal = `data: ${JSON.stringify({ type: 'final', payload: { ...finalPayload, ...extraFinalFields } })}\n\n`
           controller.enqueue(encoder.encode(sseFinal))
         } catch {
-          const sseFinal = `data: ${JSON.stringify({ type: 'final', payload: { aiReplyMessage: fullText, intent: 'QUERY', participantsTokenized: [], conflicts: [] } })}\n\n`
+          const sseFinal = `data: ${JSON.stringify({ type: 'final', payload: { aiReplyMessage: fullText, intent: 'QUERY', participantsTokenized: [], conflicts: [], ...extraFinalFields } })}\n\n`
           controller.enqueue(encoder.encode(sseFinal))
         }
 
@@ -540,7 +541,10 @@ ${contextText || '\n[No existing events found]'}`
 
     // ── 스트리밍 모드: SSE 응답 ──────────────────────────────────────────────
     if (isStreaming) {
-      const sseStream = await callGeminiStreaming(ai, modelUsed, contents, systemInstruction)
+      const speculativeFields = hasSpeculativeDraft
+        ? { cloudLogprobs, draftAcceptanceInfo: { k: draftTokens?.length ?? 0 } }
+        : {}
+      const sseStream = await callGeminiStreaming(ai, modelUsed, contents, systemInstruction, speculativeFields)
       return new Response(sseStream, {
         headers: {
           ...corsHeaders,

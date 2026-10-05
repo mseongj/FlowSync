@@ -4,9 +4,11 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flow_sync/core/llm/llama_ffi_service.dart';
 import 'package:flow_sync/features/nlp/data/services/ai_orchestration_service.dart';
 import 'package:flow_sync/features/nlp/domain/entities/ai_scheduling_response.dart';
+import 'package:flow_sync/features/nlp/domain/entities/nlp_stream_chunk.dart';
 
 class MockSupabaseClient extends Mock implements SupabaseClient {}
 class MockLlamaFfiService extends Mock implements LlamaFfiService {}
+class MockFunctionsClient extends Mock implements FunctionsClient {}
 
 void main() {
   late AiOrchestrationService service;
@@ -236,6 +238,129 @@ void main() {
       final command = service.tokenize('내일 3시 팀 미팅');
       // 단순 발화: 시간 존재, 복잡 키워드 없음 → Early-Exit 가능
       expect(service.canLocalEarlyExit(command), true);
+    });
+  });
+
+  group('processCommandStream pipeline', () {
+    late MockFunctionsClient mockFunctions;
+
+    const finalPayloadSse =
+        'data: {"type":"token","chunk":"{\\"intent\\""}\n\n'
+        'data: {"type":"final","payload":{"intent":"QUERY",'
+        '"aiReplyMessage":"언제로 할까요?","participantsTokenized":[],'
+        '"conflicts":[],"cloudLogprobs":[-0.1,-0.1]}}\n\n';
+
+    void stubInvoke(Future<FunctionResponse> Function() answer) {
+      when(
+        () => mockFunctions.invoke(
+          any(),
+          headers: any(named: 'headers'),
+          body: any(named: 'body'),
+          queryParameters: any(named: 'queryParameters'),
+          method: any(named: 'method'),
+        ),
+      ).thenAnswer((_) => answer());
+    }
+
+    setUpAll(() {
+      registerFallbackValue(HttpMethod.post);
+    });
+
+    setUp(() {
+      mockFunctions = MockFunctionsClient();
+      when(() => mockSupabase.functions).thenReturn(mockFunctions);
+    });
+
+    test('parses SSE token + final chunks from cloud', () async {
+      stubInvoke(() async => FunctionResponse(data: finalPayloadSse, status: 200));
+
+      final chunks = await service
+          .processCommandStream(service.tokenize('민지랑 언제 만날지 조율해줘'))
+          .toList();
+
+      expect(chunks.first, isA<NlpTokenChunk>());
+      expect(chunks.last, isA<NlpFinalChunk>());
+      expect((chunks.last as NlpFinalChunk).response.intent, 'QUERY');
+    });
+
+    test('attaches Llama draft tokens to the request when model is loaded', () async {
+      when(() => mockLlama.isLoaded).thenReturn(true);
+      when(() => mockLlama.generateDraft(any())).thenReturn(
+        LlamaDraftResult(tokens: const [1, 2], logprobs: const [-0.2, -0.3]),
+      );
+      stubInvoke(() async => FunctionResponse(data: finalPayloadSse, status: 200));
+
+      await service
+          .processCommandStream(service.tokenize('민지랑 언제 만날지 조율해줘'))
+          .toList();
+
+      final captured = verify(
+        () => mockFunctions.invoke(
+          any(),
+          headers: any(named: 'headers'),
+          body: captureAny(named: 'body'),
+          queryParameters: any(named: 'queryParameters'),
+          method: any(named: 'method'),
+        ),
+      ).captured.single as Map<String, dynamic>;
+      expect(captured['draftTokens'], [1, 2]);
+    });
+
+    test('falls back to local parser when SSE stream reports an error', () async {
+      stubInvoke(() async => FunctionResponse(
+            data: 'data: {"type":"error","message":"boom"}\n\n',
+            status: 200,
+          ));
+
+      final chunks = await service
+          .processCommandStream(
+            service.tokenize('내일 3시 팀 미팅'),
+            enableEarlyExit: false,
+          )
+          .toList();
+
+      expect(chunks.single, isA<NlpFinalChunk>());
+      expect((chunks.single as NlpFinalChunk).response.startTime, isNotNull);
+    });
+
+    test('falls back to local parser on network failure', () async {
+      stubInvoke(() async => throw Exception('offline'));
+
+      final chunks = await service
+          .processCommandStream(
+            service.tokenize('내일 3시 팀 미팅'),
+            enableEarlyExit: false,
+          )
+          .toList();
+
+      expect(chunks.single, isA<NlpFinalChunk>());
+    });
+
+    test('throws CircuitOpenException when cloud fails and local parser cannot help', () async {
+      stubInvoke(() async => throw Exception('offline'));
+
+      expect(
+        service.processCommandStream(service.tokenize('안녕')).toList(),
+        throwsA(isA<CircuitOpenException>()),
+      );
+    });
+
+    test('skips the cloud when Early-Exit consensus succeeds', () async {
+      var cloudCalls = 0;
+      stubInvoke(() async {
+        cloudCalls++;
+        return FunctionResponse(data: finalPayloadSse, status: 200);
+      });
+
+      // DP-ICL 합의는 확률적이므로 여러 번 시도해 최소 1회는 로컬 처리되는지 확인
+      const attempts = 20;
+      for (var i = 0; i < attempts; i++) {
+        final chunks = await service
+            .processCommandStream(service.tokenize('내일 3시 팀 미팅'))
+            .toList();
+        expect(chunks.last, isA<NlpFinalChunk>());
+      }
+      expect(cloudCalls, lessThan(attempts));
     });
   });
 }
