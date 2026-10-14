@@ -128,6 +128,13 @@ class NlpInputBloc extends Bloc<NlpInputEvent, NlpInputState> {
               );
             }
             return NlpStreaming(List.from(_chatHistory), _currentStreamingText());
+          } else if (chunk is NlpResetChunk) {
+            // 서버 캐스케이드 / 로컬 폴백 → 지금까지의 부분 답변 폐기
+            final idx = _chatHistory.indexWhere((m) => m.id == 'streaming');
+            if (idx != -1) {
+              _chatHistory[idx] = _chatHistory[idx].copyWith(text: '');
+            }
+            return NlpStreaming(List.from(_chatHistory), '');
           } else if (chunk is NlpFinalChunk) {
             // 스트리밍 완료 → 최종 응답으로 교체
             final hydratedResponse = chunk.response.hydrateAll(_ephemeralTokenMap);
@@ -185,9 +192,15 @@ class NlpInputBloc extends Bloc<NlpInputEvent, NlpInputState> {
     }
   }
 
+  /// 스트리밍 버블에 표시할 텍스트. PII 토큰([PERSON_1] 등)을 로컬 원문으로 복원.
   String _currentStreamingText() {
     final idx = _chatHistory.indexWhere((m) => m.id == 'streaming');
-    return idx != -1 ? _chatHistory[idx].text : '';
+    if (idx == -1) return '';
+    var text = _chatHistory[idx].text;
+    _ephemeralTokenMap.forEach((token, original) {
+      text = text.replaceAll(token, original);
+    });
+    return text;
   }
 
   void _recordSuccess() {

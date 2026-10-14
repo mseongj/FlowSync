@@ -14,6 +14,8 @@
 #include <cstdlib>
 #include <cstdint>
 #include <vector>
+#include <mutex>
+#include <atomic>
 #include <android/log.h>
 
 // llama.cpp 공개 헤더
@@ -24,8 +26,12 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 // ── 전역 모델 상태 ─────────────────────────────────────────────────────────
-static llama_model*   g_model   = nullptr;
-static llama_context* g_ctx     = nullptr;
+// Dart 측에서 load/draft/free가 서로 다른 isolate(스레드)에서 호출되므로
+// g_mutex로 보호한다. is_loaded는 UI 스레드에서 호출되므로 lock 없이 atomic 조회.
+static llama_model*      g_model   = nullptr;
+static llama_context*    g_ctx     = nullptr;
+static std::mutex        g_mutex;
+static std::atomic<bool> g_loaded{false};
 
 extern "C" {
 
@@ -38,6 +44,9 @@ extern "C" {
  * @return  0 = 성공, -1 = 실패
  */
 int32_t llama_flutter_load(const char* model_path, int32_t n_ctx) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_loaded = false;
+
     if (g_model != nullptr) {
         LOGI("Model already loaded. Unloading previous model first.");
         if (g_ctx != nullptr) {
@@ -73,6 +82,7 @@ int32_t llama_flutter_load(const char* model_path, int32_t n_ctx) {
         return -1;
     }
 
+    g_loaded = true;
     LOGI("Model loaded successfully. n_ctx=%d", n_ctx);
     return 0;
 }
@@ -83,6 +93,8 @@ int32_t llama_flutter_load(const char* model_path, int32_t n_ctx) {
  * 앱 종료 시 또는 메모리 부족 시 호출.
  */
 void llama_flutter_free() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_loaded = false;
     if (g_ctx   != nullptr) { llama_free(g_ctx);        g_ctx   = nullptr; }
     if (g_model != nullptr) { llama_model_free(g_model); g_model = nullptr; }
     LOGI("Model freed.");
@@ -104,6 +116,7 @@ int32_t llama_flutter_draft(
     int32_t*    out_tokens,
     float*      out_logprobs
 ) {
+    std::lock_guard<std::mutex> lock(g_mutex);
     if (g_model == nullptr || g_ctx == nullptr) {
         LOGE("Model not loaded. Call llama_flutter_load() first.");
         return -1;
@@ -189,7 +202,7 @@ int32_t llama_flutter_draft(
 
 // ── 4. 모델 로드 여부 확인 ────────────────────────────────────────────────
 int32_t llama_flutter_is_loaded() {
-    return (g_model != nullptr && g_ctx != nullptr) ? 1 : 0;
+    return g_loaded.load() ? 1 : 0;
 }
 
 } // extern "C"

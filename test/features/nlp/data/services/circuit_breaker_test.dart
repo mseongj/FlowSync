@@ -44,20 +44,20 @@ void main() {
       final command = createTestCommand();
 
       // Act: First failure
-      expect(
-        () => service.processCommand(command),
+      await expectLater(
+        service.processCommand(command),
         throwsA(isA<CircuitOpenException>()),
       );
 
       // Second failure
-      expect(
-        () => service.processCommand(command),
+      await expectLater(
+        service.processCommand(command),
         throwsA(isA<CircuitOpenException>()),
       );
 
       // Third call should fail IMMEDIATELY with CircuitOpenException (not API error)
-      expect(
-        () => service.processCommand(command),
+      await expectLater(
+        service.processCommand(command),
         throwsA(
           isA<CircuitOpenException>().having(
             (e) => e.message,
@@ -92,8 +92,8 @@ void main() {
       when(() => mockSupabase.functions).thenReturn(mockFunctions);
 
       // Act: This should fail immediately without calling the API
-      expect(
-        () => service.processCommand(command),
+      await expectLater(
+        service.processCommand(command),
         throwsA(isA<CircuitOpenException>()),
       );
 

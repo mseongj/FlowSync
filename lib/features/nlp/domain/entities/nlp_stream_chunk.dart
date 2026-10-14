@@ -14,3 +14,10 @@ final class NlpFinalChunk extends NlpStreamChunk {
   final AiSchedulingResponse response;
   NlpFinalChunk(this.response);
 }
+
+/// 서버가 FrugalGPT 캐스케이드로 상위 모델에서 재생성을 시작함.
+/// 지금까지 받은 부분 텍스트를 버려야 한다.
+final class NlpResetChunk extends NlpStreamChunk {
+  final String reason;
+  NlpResetChunk(this.reason);
+}

@@ -3,12 +3,12 @@ import 'package:mocktail/mocktail.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flow_sync/core/llm/llama_ffi_service.dart';
 import 'package:flow_sync/features/nlp/data/services/ai_orchestration_service.dart';
+import 'package:flow_sync/features/nlp/data/services/partial_reply_extractor.dart';
 import 'package:flow_sync/features/nlp/domain/entities/ai_scheduling_response.dart';
 import 'package:flow_sync/features/nlp/domain/entities/nlp_stream_chunk.dart';
 
 class MockSupabaseClient extends Mock implements SupabaseClient {}
 class MockLlamaFfiService extends Mock implements LlamaFfiService {}
-class MockFunctionsClient extends Mock implements FunctionsClient {}
 
 void main() {
   late AiOrchestrationService service;
@@ -242,75 +242,105 @@ void main() {
   });
 
   group('processCommandStream pipeline', () {
-    late MockFunctionsClient mockFunctions;
+    // Gemini는 JSON을 조각으로 스트리밍한다 → 클라이언트는 aiReplyMessage만 보여야 함
+    const sseLines = [
+      r'data: {"type":"token","chunk":"{\"intent\":\"QUERY\",\"aiRe"}',
+      '',
+      r'data: {"type":"token","chunk":"plyMessage\":\"언제로 "}',
+      '',
+      r'data: {"type":"token","chunk":"할까요?\",\"conflicts\":[]}"}',
+      '',
+      'data: {"type":"final","payload":{"intent":"QUERY",'
+          '"aiReplyMessage":"언제로 할까요?","participantsTokenized":[],'
+          '"conflicts":[],"cloudLogprobs":[-0.1,-0.1]}}',
+      '',
+    ];
 
-    const finalPayloadSse =
-        'data: {"type":"token","chunk":"{\\"intent\\""}\n\n'
-        'data: {"type":"final","payload":{"intent":"QUERY",'
-        '"aiReplyMessage":"언제로 할까요?","participantsTokenized":[],'
-        '"conflicts":[],"cloudLogprobs":[-0.1,-0.1]}}\n\n';
+    late int transportCalls;
+    late List<Map<String, dynamic>> sentBodies;
 
-    void stubInvoke(Future<FunctionResponse> Function() answer) {
-      when(
-        () => mockFunctions.invoke(
-          any(),
-          headers: any(named: 'headers'),
-          body: any(named: 'body'),
-          queryParameters: any(named: 'queryParameters'),
-          method: any(named: 'method'),
-        ),
-      ).thenAnswer((_) => answer());
+    void useTransport(Stream<String> Function() lines) {
+      service.sseTransportOverride = (body) {
+        transportCalls++;
+        sentBodies.add(body);
+        return lines();
+      };
     }
 
-    setUpAll(() {
-      registerFallbackValue(HttpMethod.post);
-    });
-
     setUp(() {
-      mockFunctions = MockFunctionsClient();
-      when(() => mockSupabase.functions).thenReturn(mockFunctions);
+      transportCalls = 0;
+      sentBodies = [];
     });
 
-    test('parses SSE token + final chunks from cloud', () async {
-      stubInvoke(() async => FunctionResponse(data: finalPayloadSse, status: 200));
+    test('emits only reply-text deltas (no raw JSON) then final', () async {
+      useTransport(() => Stream.fromIterable(sseLines));
 
       final chunks = await service
           .processCommandStream(service.tokenize('민지랑 언제 만날지 조율해줘'))
           .toList();
 
-      expect(chunks.first, isA<NlpTokenChunk>());
+      final tokens = chunks.whereType<NlpTokenChunk>().map((c) => c.text).join();
+      expect(tokens, '언제로 할까요?');
+      expect(tokens.contains('{'), isFalse);
       expect(chunks.last, isA<NlpFinalChunk>());
       expect((chunks.last as NlpFinalChunk).response.intent, 'QUERY');
     });
 
+    test('forwards server cascade reset as NlpResetChunk', () async {
+      useTransport(() => Stream.fromIterable([
+            r'data: {"type":"token","chunk":"{\"aiReplyMessage\":\"bad"}',
+            'data: {"type":"reset","reason":"FALLBACK_LOW_QUALITY"}',
+            ...sseLines,
+          ]));
+
+      final chunks = await service
+          .processCommandStream(service.tokenize('민지랑 언제 만날지 조율해줘'))
+          .toList();
+
+      final resetIdx = chunks.indexWhere((c) => c is NlpResetChunk);
+      expect(resetIdx, greaterThan(0));
+      final afterReset = chunks
+          .skip(resetIdx + 1)
+          .whereType<NlpTokenChunk>()
+          .map((c) => c.text)
+          .join();
+      expect(afterReset, '언제로 할까요?');
+    });
+
     test('attaches Llama draft tokens to the request when model is loaded', () async {
       when(() => mockLlama.isLoaded).thenReturn(true);
-      when(() => mockLlama.generateDraft(any())).thenReturn(
-        LlamaDraftResult(tokens: const [1, 2], logprobs: const [-0.2, -0.3]),
+      when(() => mockLlama.generateDraft(any())).thenAnswer(
+        (_) async =>
+            LlamaDraftResult(tokens: const [1, 2], logprobs: const [-0.2, -0.3]),
       );
-      stubInvoke(() async => FunctionResponse(data: finalPayloadSse, status: 200));
+      useTransport(() => Stream.fromIterable(sseLines));
 
       await service
           .processCommandStream(service.tokenize('민지랑 언제 만날지 조율해줘'))
           .toList();
 
-      final captured = verify(
-        () => mockFunctions.invoke(
-          any(),
-          headers: any(named: 'headers'),
-          body: captureAny(named: 'body'),
-          queryParameters: any(named: 'queryParameters'),
-          method: any(named: 'method'),
-        ),
-      ).captured.single as Map<String, dynamic>;
-      expect(captured['draftTokens'], [1, 2]);
+      expect(sentBodies.single['draftTokens'], [1, 2]);
+    });
+
+    test('skips draft when generation exceeds latency budget', () async {
+      when(() => mockLlama.isLoaded).thenReturn(true);
+      when(() => mockLlama.generateDraft(any())).thenAnswer((_) async {
+        await Future<void>.delayed(const Duration(seconds: 2));
+        return LlamaDraftResult(tokens: const [1], logprobs: const [-0.1]);
+      });
+      useTransport(() => Stream.fromIterable(sseLines));
+
+      await service
+          .processCommandStream(service.tokenize('민지랑 언제 만날지 조율해줘'))
+          .toList();
+
+      expect(sentBodies.single.containsKey('draftTokens'), isFalse);
     });
 
     test('falls back to local parser when SSE stream reports an error', () async {
-      stubInvoke(() async => FunctionResponse(
-            data: 'data: {"type":"error","message":"boom"}\n\n',
-            status: 200,
-          ));
+      useTransport(() => Stream.fromIterable([
+            'data: {"type":"error","message":"boom"}',
+          ]));
 
       final chunks = await service
           .processCommandStream(
@@ -323,8 +353,26 @@ void main() {
       expect((chunks.single as NlpFinalChunk).response.startTime, isNotNull);
     });
 
+    test('clears partial text (reset) before local fallback on mid-stream failure', () async {
+      useTransport(() async* {
+        yield r'data: {"type":"token","chunk":"{\"aiReplyMessage\":\"부분"}';
+        throw Exception('connection dropped');
+      });
+
+      final chunks = await service
+          .processCommandStream(
+            service.tokenize('내일 3시 팀 미팅'),
+            enableEarlyExit: false,
+          )
+          .toList();
+
+      expect(chunks[0], isA<NlpTokenChunk>());
+      expect(chunks[1], isA<NlpResetChunk>());
+      expect(chunks[2], isA<NlpFinalChunk>());
+    });
+
     test('falls back to local parser on network failure', () async {
-      stubInvoke(() async => throw Exception('offline'));
+      useTransport(() => Stream.error(Exception('offline')));
 
       final chunks = await service
           .processCommandStream(
@@ -336,8 +384,21 @@ void main() {
       expect(chunks.single, isA<NlpFinalChunk>());
     });
 
+    test('falls back when stream ends without a final payload', () async {
+      useTransport(() => Stream.fromIterable(sseLines.take(2)));
+
+      final chunks = await service
+          .processCommandStream(
+            service.tokenize('내일 3시 팀 미팅'),
+            enableEarlyExit: false,
+          )
+          .toList();
+
+      expect(chunks.last, isA<NlpFinalChunk>());
+    });
+
     test('throws CircuitOpenException when cloud fails and local parser cannot help', () async {
-      stubInvoke(() async => throw Exception('offline'));
+      useTransport(() => Stream.error(Exception('offline')));
 
       expect(
         service.processCommandStream(service.tokenize('안녕')).toList(),
@@ -346,11 +407,7 @@ void main() {
     });
 
     test('skips the cloud when Early-Exit consensus succeeds', () async {
-      var cloudCalls = 0;
-      stubInvoke(() async {
-        cloudCalls++;
-        return FunctionResponse(data: finalPayloadSse, status: 200);
-      });
+      useTransport(() => Stream.fromIterable(sseLines));
 
       // DP-ICL 합의는 확률적이므로 여러 번 시도해 최소 1회는 로컬 처리되는지 확인
       const attempts = 20;
@@ -360,7 +417,35 @@ void main() {
             .toList();
         expect(chunks.last, isA<NlpFinalChunk>());
       }
-      expect(cloudCalls, lessThan(attempts));
+      expect(transportCalls, lessThan(attempts));
+    });
+  });
+
+  group('PartialReplyExtractor', () {
+    test('returns empty until aiReplyMessage starts', () {
+      expect(PartialReplyExtractor.extract('{"intent":"CRE'), '');
+    });
+
+    test('decodes escapes and stops at closing quote', () {
+      expect(
+        PartialReplyExtractor.extract(r'{"aiReplyMessage":"a\"b\nc\u00e9","x":1}'),
+        'a"b\ncé',
+      );
+    });
+
+    test('holds back a truncated escape sequence', () {
+      expect(PartialReplyExtractor.extract(r'{"aiReplyMessage":"ab\u00'), 'ab');
+      expect(PartialReplyExtractor.extract(r'{"aiReplyMessage":"ab\'), 'ab');
+    });
+
+    test('add() yields incremental deltas across fragments', () {
+      final ex = PartialReplyExtractor();
+      expect(ex.add('{"aiReplyMes'), '');
+      expect(ex.add('sage":"안녕'), '안녕');
+      expect(ex.add('하세요","conflicts":[]}'), '하세요');
+      expect(ex.reply, '안녕하세요');
+      ex.reset();
+      expect(ex.reply, '');
     });
   });
 }

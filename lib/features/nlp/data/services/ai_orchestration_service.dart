@@ -1,13 +1,17 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 import 'package:injectable/injectable.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'package:flow_sync/core/config/env.dart';
 import 'package:flow_sync/core/llm/llama_ffi_service.dart';
 import 'package:flow_sync/core/llm/speculative_decode_manager.dart';
 import 'package:flow_sync/core/privacy/differential_privacy_service.dart';
 import 'package:flow_sync/core/privacy/dp_icl_consensus.dart';
+import 'package:flow_sync/features/nlp/data/services/partial_reply_extractor.dart';
 import 'package:flow_sync/features/nlp/domain/entities/ai_scheduling_response.dart';
 import 'package:flow_sync/features/nlp/domain/entities/nlp_command.dart';
 import 'package:flow_sync/features/nlp/domain/entities/nlp_stream_chunk.dart';
@@ -260,11 +264,8 @@ class AiOrchestrationService {
     // ── 1. Cloud Execution via Circuit Breaker ──────────────────────
     if (!_isCircuitOpen()) {
       try {
-        // Speculative Decoding: Draft 토큰 생성 시도
-        LlamaDraftResult? draft;
-        if (_llama.isLoaded) {
-          draft = _llama.generateDraft(command.tokenizedText);
-        }
+        // Speculative Decoding: Draft 토큰 생성 시도 (백그라운드 isolate)
+        final draft = await _tryGenerateDraft(command);
 
         final body = <String, dynamic>{
           'text': command.tokenizedText,
@@ -395,42 +396,26 @@ class AiOrchestrationService {
       throw CircuitOpenException();
     }
 
-    // ── 2. Speculative Decoding: Draft 생성 ──────────────────────────
-    final draft = _tryGenerateDraft(command);
+    // ── 2. Speculative Decoding: Draft 생성 (백그라운드 isolate) ──────
+    final draft = await _tryGenerateDraft(command);
+
+    final body = <String, dynamic>{
+      'text': command.tokenizedText,
+      if (chatHistory.isNotEmpty) 'chatHistory': chatHistory,
+      if (draft != null) ...SpeculativeDecodeManager.serializeDraft(draft),
+    };
 
     var receivedFinal = false;
+    var yieldedTokens = false;
+    final extractor = PartialReplyExtractor();
     try {
-      final request = await _supabase.functions.invoke(
-        'nlp-agent-function',
-        body: {
-          'text': command.tokenizedText,
-          if (chatHistory.isNotEmpty) 'chatHistory': chatHistory,
-          if (draft != null) ...SpeculativeDecodeManager.serializeDraft(draft),
-        },
-        headers: {'X-FlowSync-Streaming': 'true'},
-        method: HttpMethod.post,
-        queryParameters: {'streaming': 'true'},
-      );
-
-      if (request.status >= 400) {
-        throw Exception('Edge function error: ${request.status}');
-      }
-
-      // Supabase invoke는 SSE를 직접 스트리밍 지원하지 않으므로
-      // 단일 응답에서 SSE 라인을 파싱하는 방식으로 처리
-      final rawData = request.data;
-      if (rawData is String) {
-        await for (final chunk in _parseSseLines(rawData, draft: draft)) {
-          if (chunk is NlpFinalChunk) receivedFinal = true;
-          yield chunk;
-        }
-      } else if (rawData is Map<String, dynamic>) {
-        // JSON 폴백 (스트리밍 미지원 환경)
-        _evaluateSpeculative(draft, rawData);
-        receivedFinal = true;
-        yield NlpFinalChunk(
-          _applyDpNoise(AiSchedulingResponse.fromJson(rawData)),
-        );
+      // ── 3. 실시간 SSE 수신 (라인 단위로 도착 즉시 처리) ──────────────
+      await for (final line in _openSseLines(body)) {
+        final chunk = _parseSseLine(line, draft: draft, extractor: extractor);
+        if (chunk == null) continue;
+        if (chunk is NlpFinalChunk) receivedFinal = true;
+        if (chunk is NlpTokenChunk) yieldedTokens = true;
+        yield chunk;
       }
 
       if (!receivedFinal) {
@@ -445,6 +430,8 @@ class AiOrchestrationService {
         final fallback = _tryLocalFallback(command);
         if (fallback != null) {
           debugPrint('🛟 [Stream] Cloud 실패 → 로컬 파서 폴백: $e');
+          // 이미 화면에 그려진 부분 답변은 지운다
+          if (yieldedTokens) yield NlpResetChunk('local_fallback');
           yield NlpFinalChunk(fallback);
           return;
         }
@@ -453,11 +440,86 @@ class AiOrchestrationService {
     }
   }
 
-  /// Llama 모델이 로드되어 있으면 Draft 토큰을 생성. 실패 시 null.
-  LlamaDraftResult? _tryGenerateDraft(NlpCommand command) {
+  // ──────────────────────────────────────────────────────────────────────
+  // SSE 전송 계층
+  // ──────────────────────────────────────────────────────────────────────
+
+  /// 서버가 SSE 라인을 보내지 않고 멈춘 경우 끊어내는 유휴 타임아웃.
+  static const _sseIdleTimeout = Duration(seconds: 20);
+
+  /// 연결 수립(응답 헤더 수신)까지의 타임아웃.
+  static const _sseConnectTimeout = Duration(seconds: 15);
+
+  /// Draft 생성이 Cloud 요청을 지연시키지 않도록 하는 예산.
+  /// 초과 시 Draft 없이 Cloud로 바로 진행한다.
+  static const _draftBudget = Duration(milliseconds: 800);
+
+  /// 테스트용: SSE 라인 공급자를 교체한다 (요청 body를 받아 라인 스트림 반환).
+  @visibleForTesting
+  Stream<String> Function(Map<String, dynamic> body)? sseTransportOverride;
+
+  /// Edge Function에 스트리밍 요청을 보내고 응답을 **도착하는 즉시** 라인 단위로 yield.
+  ///
+  /// `supabase.functions.invoke()`는 응답 본문 전체를 버퍼링하므로
+  /// 실시간 타이핑 효과가 불가능하다 → `http` StreamedResponse로 직접 수신.
+  Stream<String> _openSseLines(Map<String, dynamic> body) async* {
+    final override = sseTransportOverride;
+    if (override != null) {
+      yield* override(body);
+      return;
+    }
+
+    final uri = Uri.parse('${Env.supabaseUrl}/functions/v1/nlp-agent-function')
+        .replace(queryParameters: {'streaming': 'true'});
+    final accessToken =
+        _supabase.auth.currentSession?.accessToken ?? Env.supabaseAnonKey;
+
+    final client = http.Client();
+    try {
+      final request = http.Request('POST', uri)
+        ..headers.addAll({
+          'Authorization': 'Bearer $accessToken',
+          'apikey': Env.supabaseAnonKey,
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream',
+          'X-FlowSync-Streaming': 'true',
+        })
+        ..body = jsonEncode(body);
+
+      final response = await client.send(request).timeout(_sseConnectTimeout);
+
+      if (response.statusCode >= 400) {
+        final errBody = await response.stream.bytesToString();
+        throw Exception('Edge function error: ${response.statusCode} $errBody');
+      }
+
+      final contentType = response.headers['content-type'] ?? '';
+      if (!contentType.contains('text/event-stream')) {
+        // 구버전 서버(JSON 응답) 호환: 단일 final 라인으로 변환
+        final text = await response.stream.bytesToString();
+        yield 'data: ${jsonEncode({'type': 'final', 'payload': jsonDecode(text)})}';
+        return;
+      }
+
+      yield* response.stream
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .timeout(_sseIdleTimeout);
+    } finally {
+      client.close();
+    }
+  }
+
+  /// Llama 모델이 로드되어 있으면 Draft 토큰을 생성. 실패/예산 초과 시 null.
+  Future<LlamaDraftResult?> _tryGenerateDraft(NlpCommand command) async {
     try {
       if (!_llama.isLoaded) return null;
-      return _llama.generateDraft(command.tokenizedText);
+      Future<LlamaDraftResult?> draftFuture() async =>
+          _llama.generateDraft(command.tokenizedText);
+      return await draftFuture().timeout(_draftBudget, onTimeout: () {
+        debugPrint('🦙 [Speculative] Draft 예산(${_draftBudget.inMilliseconds}ms) 초과 → 생략');
+        return null;
+      });
     } catch (e) {
       debugPrint('🦙 [Speculative] Draft 생성 예외 → 생략: $e');
       return null;
@@ -475,44 +537,51 @@ class AiOrchestrationService {
     debugPrint('📊 [Speculative] $result');
   }
 
-  /// SSE 형식의 raw 문자열에서 [NlpStreamChunk]를 파싱.
+  /// SSE 한 줄을 [NlpStreamChunk]로 변환. 표시할 내용이 없으면 null.
   ///
-  /// - 잘못된 JSON 라인은 건너뜀
-  /// - `type: error` 라인은 예외로 전파 (상위에서 폴백 처리)
-  Stream<NlpStreamChunk> _parseSseLines(
-    String raw, {
+  /// - `token`: 미완성 JSON 조각 → [PartialReplyExtractor]로 답변 텍스트 delta만 추출
+  /// - `reset`: 서버 캐스케이드(Flash-Lite → Flash) 재생성 → 누적 상태 초기화
+  /// - `final`: 최종 페이로드 → DP 노이즈 적용 + Speculative 판정
+  /// - `error`: 예외로 전파 (상위에서 폴백 처리)
+  /// - 잘못된 JSON / `data: ` 이외의 라인은 무시
+  NlpStreamChunk? _parseSseLine(
+    String line, {
+    required PartialReplyExtractor extractor,
     LlamaDraftResult? draft,
-  }) async* {
-    final lines = raw.split('\n');
-    for (final line in lines) {
-      if (!line.startsWith('data: ')) continue;
-      final jsonStr = line.substring(6).trim();
-      if (jsonStr.isEmpty) continue;
+  }) {
+    if (!line.startsWith('data: ')) return null;
+    final jsonStr = line.substring(6).trim();
+    if (jsonStr.isEmpty) return null;
 
-      final Map<String, dynamic> json;
-      try {
-        json = Map<String, dynamic>.from(
-          jsonDecode(jsonStr) as Map<String, dynamic>,
-        );
-      } catch (_) {
-        // 개별 라인 JSON 파싱 실패는 무시
-        continue;
-      }
+    final Map<String, dynamic> json;
+    try {
+      json = Map<String, dynamic>.from(
+        jsonDecode(jsonStr) as Map<String, dynamic>,
+      );
+    } catch (_) {
+      return null;
+    }
 
-      final type = json['type'] as String?;
-      if (type == 'token') {
-        yield NlpTokenChunk(json['chunk'] as String? ?? '');
-      } else if (type == 'final') {
+    switch (json['type'] as String?) {
+      case 'token':
+        final delta = extractor.add(json['chunk'] as String? ?? '');
+        return delta.isEmpty ? null : NlpTokenChunk(delta);
+      case 'reset':
+        extractor.reset();
+        final reason = json['reason'] as String? ?? 'cascade';
+        debugPrint('🔁 [Stream] 서버 캐스케이드 재생성: $reason');
+        return NlpResetChunk(reason);
+      case 'final':
         final payload = json['payload'];
-        if (payload is Map<String, dynamic>) {
-          _evaluateSpeculative(draft, payload);
-          yield NlpFinalChunk(
-            _applyDpNoise(AiSchedulingResponse.fromJson(payload)),
-          );
-        }
-      } else if (type == 'error') {
+        if (payload is! Map<String, dynamic>) return null;
+        _evaluateSpeculative(draft, payload);
+        return NlpFinalChunk(
+          _applyDpNoise(AiSchedulingResponse.fromJson(payload)),
+        );
+      case 'error':
         throw Exception(json['message'] as String? ?? 'SSE stream error');
-      }
+      default:
+        return null;
     }
   }
 

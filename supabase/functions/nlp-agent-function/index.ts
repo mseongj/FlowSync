@@ -293,56 +293,173 @@ async function callGeminiWithTimeout(
 }
 
 /**
- * Streams Gemini response as SSE (Server-Sent Events).
- * data: {"type":"token","chunk":"..."}  — 실시간 토큰 청크
- * data: {"type":"final","payload":{...}} — 최종 JSON 페이로드
+ * Streams one Gemini generation, forwarding each text chunk via [onToken].
+ * If [firstChunkTimeoutMs] is set, aborts with TimeoutError when the first
+ * chunk does not arrive in time (FrugalGPT hard latency budget for Flash-Lite).
+ * Returns the full concatenated text.
  */
-async function callGeminiStreaming(
+async function streamGeminiOnce(
   ai: GoogleGenAI,
   modelId: string,
   contents: any,
   systemInstruction: string,
-  extraFinalFields: Record<string, unknown> = {},
-): Promise<ReadableStream<Uint8Array>> {
+  onToken: (chunk: string) => void,
+  firstChunkTimeoutMs?: number,
+): Promise<string> {
+  const stream = await ai.models.generateContentStream({
+    model: modelId,
+    contents: contents,
+    config: {
+      systemInstruction: systemInstruction,
+      responseMimeType: 'application/json',
+      responseSchema: responseSchema,
+    },
+  })
+
+  const iter = stream[Symbol.asyncIterator]()
+  let fullText = ''
+  let first = true
+
+  while (true) {
+    let next: IteratorResult<any>
+    if (first && firstChunkTimeoutMs) {
+      let timer: number | undefined
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          const err = new Error(`Model ${modelId} first chunk timed out after ${firstChunkTimeoutMs}ms`)
+          err.name = 'TimeoutError'
+          reject(err)
+        }, firstChunkTimeoutMs)
+      })
+      try {
+        next = await Promise.race([iter.next(), timeout])
+      } finally {
+        clearTimeout(timer)
+      }
+    } else {
+      next = await iter.next()
+    }
+    first = false
+    if (next.done) break
+
+    const chunkText = next.value?.text ?? ''
+    if (chunkText) {
+      fullText += chunkText
+      onToken(chunkText)
+    }
+  }
+  return fullText
+}
+
+/**
+ * Streams the scheduling response as SSE with the FrugalGPT cascade built in
+ * (single pass — no duplicate non-streaming call).
+ *
+ *   data: {"type":"token","chunk":"..."}                    — 실시간 JSON 조각
+ *   data: {"type":"reset","reason":"..."}                   — 상위 모델로 재생성 시작 (클라이언트는 부분 텍스트 폐기)
+ *   data: {"type":"final","payload":{...}}                  — 최종 JSON 페이로드 (+ 라우팅/Speculative 메타)
+ *   data: {"type":"error","message":"..."}                  — 실패
+ *
+ * Path A (complex): Flash로 바로 스트리밍.
+ * Path B (simple):  Flash-Lite 스트리밍 → 품질 점수 미달/첫 청크 타임아웃/에러 시 reset 후 Flash 스트리밍.
+ */
+function streamWithCascade(
+  ai: GoogleGenAI,
+  isComplex: boolean,
+  contents: any,
+  systemInstruction: string,
+  speculative: { hasDraft: boolean; draftCount: number },
+  reqStart: number,
+): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder()
 
   return new ReadableStream({
     async start(controller) {
-      try {
-        const stream = await ai.models.generateContentStream({
-          model: modelId,
-          contents: contents,
-          config: {
-            systemInstruction: systemInstruction,
-            responseMimeType: 'application/json',
-            responseSchema: responseSchema,
-          },
-        })
+      const send = (obj: unknown) =>
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`))
+      const onToken = (chunk: string) => send({ type: 'token', chunk })
 
-        let fullText = ''
-        for await (const chunk of stream) {
-          const chunkText = chunk.text ?? ''
-          if (chunkText) {
-            fullText += chunkText
-            const sseChunk = `data: ${JSON.stringify({ type: 'token', chunk: chunkText })}\n\n`
-            controller.enqueue(encoder.encode(sseChunk))
+      const parse = (text: string): any => {
+        try {
+          return JSON.parse(text)
+        } catch {
+          return null
+        }
+      }
+
+      try {
+        let modelUsed: string
+        let routerDecision: string
+        let parsed: any
+        let fullText: string
+
+        if (isComplex) {
+          console.log(`[Router/Stream] Pre-routing bypass -> ${MODEL_FLASH}`)
+          modelUsed = MODEL_FLASH
+          routerDecision = 'BYPASS_DIRECT_FLASH'
+          fullText = await streamGeminiOnce(ai, MODEL_FLASH, contents, systemInstruction, onToken)
+          parsed = parse(fullText)
+        } else {
+          let cascadeReason: string | null = null
+          try {
+            fullText = await streamGeminiOnce(
+              ai, MODEL_FLASH_LITE, contents, systemInstruction, onToken, HARD_TIMEOUT_MS,
+            )
+            parsed = parse(fullText)
+            const quality = scoreResponseQuality(parsed)
+            console.log(`[Router/Stream] ${MODEL_FLASH_LITE} quality=${quality.score.toFixed(2)} passed=${quality.passed} (${quality.reason})`)
+            if (!quality.passed) cascadeReason = 'FALLBACK_LOW_QUALITY'
+          } catch (err: any) {
+            const isTimeout = err?.name === 'TimeoutError'
+            console.warn(`[Router/Stream] ${MODEL_FLASH_LITE} failed (${isTimeout ? 'TIMEOUT' : err?.message})`)
+            cascadeReason = isTimeout ? 'FALLBACK_TIMEOUT' : 'FALLBACK_LOW_QUALITY'
+            fullText = ''
+          }
+
+          if (cascadeReason) {
+            send({ type: 'reset', reason: cascadeReason })
+            modelUsed = MODEL_FLASH
+            routerDecision = cascadeReason
+            fullText = await streamGeminiOnce(ai, MODEL_FLASH, contents, systemInstruction, onToken)
+            parsed = parse(fullText)
+          } else {
+            modelUsed = MODEL_FLASH_LITE
+            routerDecision = 'LITE_ACCEPTED'
           }
         }
 
-        // 스트리밍 완료 후 최종 JSON 파싱하여 payload로 전송
-        try {
-          const finalPayload = JSON.parse(fullText)
-          const sseFinal = `data: ${JSON.stringify({ type: 'final', payload: { ...finalPayload, ...extraFinalFields } })}\n\n`
-          controller.enqueue(encoder.encode(sseFinal))
-        } catch {
-          const sseFinal = `data: ${JSON.stringify({ type: 'final', payload: { aiReplyMessage: fullText, intent: 'QUERY', participantsTokenized: [], conflicts: [], ...extraFinalFields } })}\n\n`
-          controller.enqueue(encoder.encode(sseFinal))
+        const payload = parsed ?? {
+          aiReplyMessage: fullText,
+          intent: 'QUERY',
+          participantsTokenized: [],
+          conflicts: [],
         }
 
-        controller.close()
+        // Speculative Decoding: Cloud logprob 근사 (Gemini API는 logprob 미제공 → 품질 점수로 근사)
+        const speculativeFields = speculative.hasDraft
+          ? {
+              cloudLogprobs: Array(speculative.draftCount).fill(
+                Math.log(Math.max(scoreResponseQuality(payload).score, 0.01)),
+              ),
+              draftAcceptanceInfo: { k: speculative.draftCount },
+            }
+          : {}
+
+        const totalDurationMs = Date.now() - reqStart
+        console.log(`[Router/Stream] Completed in ${totalDurationMs}ms | Model=${modelUsed} | Decision=${routerDecision}`)
+
+        send({
+          type: 'final',
+          payload: {
+            ...payload,
+            ...speculativeFields,
+            routing: { modelUsed, routerDecision, latencyMs: totalDurationMs },
+          },
+        })
       } catch (err: any) {
-        const sseErr = `data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`
-        controller.enqueue(encoder.encode(sseErr))
+        console.error('[Router/Stream Error]', err)
+        send({ type: 'error', message: err?.message ?? 'stream failed' })
+      } finally {
         controller.close()
       }
     },
@@ -442,6 +559,29 @@ ${contextText || '\n[No existing events found]'}`
 
     const ai = new GoogleGenAI({ apiKey: Deno.env.get('GEMINI_API_KEY') })
 
+    // ── 스트리밍 모드: 캐스케이드를 포함한 단일 패스 SSE ─────────────────────────
+    // (이전에는 비스트리밍 캐스케이드 후 스트리밍을 다시 호출해 Gemini를 2회 호출했음)
+    if (isStreaming) {
+      const sseStream = streamWithCascade(
+        ai,
+        complexity.isComplex,
+        contents,
+        systemInstruction,
+        { hasDraft: hasSpeculativeDraft, draftCount: hasSpeculativeDraft ? draftTokens.length : 0 },
+        reqStart,
+      )
+      return new Response(sseStream, {
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+          'X-FlowSync-Streaming': 'true',
+        },
+        status: 200,
+      })
+    }
+
     let finalResponse: any
     let modelUsed: string
     let routerDecision: 'BYPASS_DIRECT_FLASH' | 'LITE_ACCEPTED' | 'FALLBACK_TIMEOUT' | 'FALLBACK_LOW_QUALITY'
@@ -539,27 +679,7 @@ ${contextText || '\n[No existing events found]'}`
       ...(hasSpeculativeDraft ? { cloudLogprobs, draftAcceptanceInfo: { k: draftTokens?.length ?? 0 } } : {}),
     }
 
-    // ── 스트리밍 모드: SSE 응답 ──────────────────────────────────────────────
-    if (isStreaming) {
-      const speculativeFields = hasSpeculativeDraft
-        ? { cloudLogprobs, draftAcceptanceInfo: { k: draftTokens?.length ?? 0 } }
-        : {}
-      const sseStream = await callGeminiStreaming(ai, modelUsed, contents, systemInstruction, speculativeFields)
-      return new Response(sseStream, {
-        headers: {
-          ...corsHeaders,
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache',
-          'X-FlowSync-Router-Decision': routerDecision,
-          'X-FlowSync-Model-Used': modelUsed,
-          'X-FlowSync-Latency-Ms': totalDurationMs.toString(),
-          'X-FlowSync-Streaming': 'true',
-        },
-        status: 200,
-      })
-    }
-
-    // ── 기존 JSON 모드 (하위 호환 유지) ────────────────────────────────────
+    // ── JSON 모드 (비스트리밍 호출 / 하위 호환) ───────────────────────────────
     return new Response(JSON.stringify(enrichedResponse), {
       headers: {
         ...corsHeaders,

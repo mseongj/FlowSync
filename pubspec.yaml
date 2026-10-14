@@ -26,6 +26,7 @@ dependencies:
   # Background & Sync
   workmanager: ^0.10.10
   supabase_flutter: ^2.5.4
+  http: ^1.2.0
 
   # Configuration & Secrets
   envied: ^1.1.0
