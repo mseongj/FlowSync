@@ -225,6 +225,8 @@ class AiOrchestrationService {
 
     // Must have a clear time indicator
     final hasTime = text.contains('내일') ||
+        text.contains('모레') ||
+        text.contains('글피') ||
         text.contains('오늘') ||
         text.contains('tomorrow') ||
         text.contains('today') ||
@@ -447,12 +449,18 @@ class AiOrchestrationService {
   /// 서버가 SSE 라인을 보내지 않고 멈춘 경우 끊어내는 유휴 타임아웃.
   static const _sseIdleTimeout = Duration(seconds: 20);
 
-  /// 연결 수립(응답 헤더 수신)까지의 타임아웃.
+  /// 첫 HTTP 연결 수립 타임아웃.
   static const _sseConnectTimeout = Duration(seconds: 15);
 
-  /// Draft 생성이 Cloud 요청을 지연시키지 않도록 하는 예산.
-  /// 초과 시 Draft 없이 Cloud로 바로 진행한다.
-  static const _draftBudget = Duration(milliseconds: 800);
+  /// 로컬 Llama 모델(초안 생성) 사용 여부. false로 끄면 순수 클라우드 모드로 동작.
+  bool enableLocalLlama = true;
+
+  /// Draft 생성 시 타임아웃 없이 모델이 완료될 때까지 대기할지 여부.
+  /// true일 경우 제한 없이 기다려 draftTokens를 100% 클라우드에 첨부.
+  bool waitDraftUnlimited = true;
+
+  /// Draft 생성이 Cloud 요청을 지연시키지 않도록 하는 기본 예산 (waitDraftUnlimited가 false일 때만 적용).
+  Duration draftBudget = const Duration(milliseconds: 1500);
 
   /// 테스트용: SSE 라인 공급자를 교체한다 (요청 body를 받아 라인 스트림 반환).
   @visibleForTesting
@@ -513,13 +521,40 @@ class AiOrchestrationService {
   /// Llama 모델이 로드되어 있으면 Draft 토큰을 생성. 실패/예산 초과 시 null.
   Future<LlamaDraftResult?> _tryGenerateDraft(NlpCommand command) async {
     try {
-      if (!_llama.isLoaded) return null;
+      if (!enableLocalLlama) {
+        debugPrint(
+          '🦙 [Speculative] 로컬 Llama 비활성화(enableLocalLlama=false) → '
+          'Draft 건너뜀 (순수 Cloud 모드)',
+        );
+        return null;
+      }
+      if (!_llama.isLoaded) {
+        debugPrint('🦙 [Speculative] 로컬 Llama 미로드 상태 → Draft 생략');
+        return null;
+      }
+
       Future<LlamaDraftResult?> draftFuture() async =>
           _llama.generateDraft(command.tokenizedText);
-      return await draftFuture().timeout(_draftBudget, onTimeout: () {
-        debugPrint('🦙 [Speculative] Draft 예산(${_draftBudget.inMilliseconds}ms) 초과 → 생략');
-        return null;
-      });
+
+      if (waitDraftUnlimited) {
+        debugPrint('🦙 [Speculative] 무제한 대기 모드: Draft 생성 완료까지 대기 중...');
+        final result = await draftFuture();
+        debugPrint(
+          '🦙 [Speculative] Draft 생성 완료: '
+          '${result?.tokens.length ?? 0} 토큰 첨부 준비 완료',
+        );
+        return result;
+      }
+
+      return await draftFuture().timeout(
+        draftBudget,
+        onTimeout: () {
+          debugPrint(
+            '🦙 [Speculative] Draft 예산(${draftBudget.inMilliseconds}ms) 초과 → 생략',
+          );
+          return null;
+        },
+      );
     } catch (e) {
       debugPrint('🦙 [Speculative] Draft 생성 예외 → 생략: $e');
       return null;
@@ -565,7 +600,11 @@ class AiOrchestrationService {
     switch (json['type'] as String?) {
       case 'token':
         final delta = extractor.add(json['chunk'] as String? ?? '');
-        return delta.isEmpty ? null : NlpTokenChunk(delta);
+        if (delta.isNotEmpty) {
+          debugPrint('🌊 [SSE Token] "$delta"');
+          return NlpTokenChunk(delta);
+        }
+        return null;
       case 'reset':
         extractor.reset();
         final reason = json['reason'] as String? ?? 'cascade';
@@ -574,6 +613,7 @@ class AiOrchestrationService {
       case 'final':
         final payload = json['payload'];
         if (payload is! Map<String, dynamic>) return null;
+        debugPrint('🏁 [SSE Final] 최종 응답 수신 완료');
         _evaluateSpeculative(draft, payload);
         return NlpFinalChunk(
           _applyDpNoise(AiSchedulingResponse.fromJson(payload)),
@@ -585,6 +625,100 @@ class AiOrchestrationService {
     }
   }
 
+
+  // ──────────────────────────────────────────────────────────────────────
+  // 로컬 시간/날짜 파서
+  // ──────────────────────────────────────────────────────────────────────
+
+  static final _koreanClock = RegExp(
+    r'(오전|오후|아침|점심|저녁|밤|새벽)?\s*(\d{1,2})\s*시(?!간)'
+    r'(?:\s*(?:(\d{1,2})\s*분|(반)))?',
+  );
+  static final _englishClock = RegExp(
+    r'(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b',
+    caseSensitive: false,
+  );
+  static final _atClock = RegExp(r'\bat\s+(\d{1,2})(?::(\d{2}))?\b');
+
+  /// 텍스트에서 시각(시, 분)을 추출. 없으면 null.
+  ///
+  /// 한국어 규칙:
+  ///  - 오전/아침/새벽 → AM, 오후/저녁/밤 → PM, 점심 → 12시 또는 PM
+  ///  - 시간대 표현이 없는 "3시" → 일정 특성상 1~6시는 오후(15시)로 해석,
+  ///    7~11시는 오전, 12시는 정오, 13시 이상은 24시간제 그대로
+  ///  - "3시 30분", "3시반" 지원, "3시간"(소요 시간)은 시각으로 오인하지 않음
+  ///  - "밤 12시"/"자정"은 24시(= 다음날 00:00)
+  /// 영어: "3pm", "3:30 pm", "at 3"(7시 미만은 오후)
+  @visibleForTesting
+  static ({int hour, int minute})? parseClockTime(String text) {
+    final lower = text.toLowerCase();
+
+    if (lower.contains('자정')) return (hour: 24, minute: 0);
+    if (lower.contains('정오')) return (hour: 12, minute: 0);
+
+    final ko = _koreanClock.firstMatch(lower);
+    if (ko != null) {
+      final period = ko.group(1);
+      var hour = int.parse(ko.group(2)!);
+      final minute = ko.group(4) != null
+          ? 30
+          : (ko.group(3) != null ? int.parse(ko.group(3)!) : 0);
+      if (hour > 24 || minute > 59) return null;
+
+      switch (period) {
+        case '오전':
+        case '아침':
+        case '새벽':
+          if (hour == 12) hour = 0;
+        case '오후':
+        case '저녁':
+          if (hour < 12) hour += 12;
+        case '밤':
+          if (hour == 12) {
+            hour = 24;
+          } else if (hour < 12) {
+            hour += 12;
+          }
+        case '점심':
+          if (hour >= 1 && hour <= 6) hour += 12; // 점심 1시 → 13시
+        default:
+          if (hour >= 1 && hour <= 6) hour += 12;
+      }
+      return (hour: hour, minute: minute);
+    }
+
+    final en = _englishClock.firstMatch(lower);
+    if (en != null) {
+      var hour = int.parse(en.group(1)!);
+      final minute = en.group(2) != null ? int.parse(en.group(2)!) : 0;
+      if (hour > 12 || hour < 1 || minute > 59) return null;
+      final isPm = en.group(3)!.toLowerCase() == 'pm';
+      if (isPm && hour < 12) hour += 12;
+      if (!isPm && hour == 12) hour = 0;
+      return (hour: hour, minute: minute);
+    }
+
+    final at = _atClock.firstMatch(lower);
+    if (at != null) {
+      var hour = int.parse(at.group(1)!);
+      final minute = at.group(2) != null ? int.parse(at.group(2)!) : 0;
+      if (hour > 24 || minute > 59) return null;
+      if (hour >= 1 && hour < 7) hour += 12;
+      return (hour: hour, minute: minute);
+    }
+
+    return null;
+  }
+
+  /// "오늘/내일/모레/글피" 등 상대 날짜를 오늘 기준 일수 오프셋으로 변환.
+  @visibleForTesting
+  static int parseDayOffset(String text) {
+    final lower = text.toLowerCase();
+    if (lower.contains('글피')) return 3;
+    if (lower.contains('모레') || lower.contains('day after tomorrow')) return 2;
+    if (lower.contains('내일') || lower.contains('tomorrow')) return 1;
+    return 0; // 오늘/today/날짜 표현 없음
+  }
 
   /// Local fallback NLP: parses simple scheduling patterns offline
   /// or provides instant Local Early-Exit.
@@ -599,58 +733,18 @@ class AiOrchestrationService {
     DateTime? startTime;
     DateTime? endTime;
 
-    final isTomorrow =
-        text.contains('내일') || text.contains('tomorrow');
-    final isToday =
-        text.contains('오늘') || text.contains('today');
-    final baseDate = isTomorrow
-        ? DateTime(now.year, now.month, now.day + 1)
-        : DateTime(now.year, now.month, now.day);
+    final dayOffset = parseDayOffset(text);
+    final baseDate = DateTime(now.year, now.month, now.day + dayOffset);
 
-    final koreanTime = RegExp(r'(\d{1,2})시');
-    final englishTime = RegExp(r'(\d{1,2})\s*(am|pm)', caseSensitive: false);
-    final atTime = RegExp(r'at\s+(\d{1,2})');
-
-    final koreanMatch = koreanTime.firstMatch(text);
-    final englishMatch = englishTime.firstMatch(text);
-    final atMatch = atTime.firstMatch(text);
-
-    if (koreanMatch != null) {
-      final hour = int.parse(koreanMatch.group(1)!);
+    final clock = parseClockTime(text);
+    if (clock != null) {
+      // hour == 24 는 DateTime이 다음날 00:00으로 정규화
       startTime = DateTime(
         baseDate.year,
         baseDate.month,
         baseDate.day,
-        hour,
-      );
-    } else if (englishMatch != null) {
-      var hour = int.parse(englishMatch.group(1)!);
-      final isPm =
-          englishMatch.group(2)!.toLowerCase() == 'pm';
-      if (isPm && hour < 12) hour += 12;
-      if (!isPm && hour == 12) hour = 0;
-      startTime = DateTime(
-        baseDate.year,
-        baseDate.month,
-        baseDate.day,
-        hour,
-      );
-    } else if (atMatch != null) {
-      final hour = int.parse(atMatch.group(1)!);
-      startTime = DateTime(
-        baseDate.year,
-        baseDate.month,
-        baseDate.day,
-        hour < 7 ? hour + 12 : hour,
-      );
-    }
-
-    if (startTime != null && !isTomorrow && !isToday) {
-      startTime = DateTime(
-        now.year,
-        now.month,
-        now.day,
-        startTime.hour,
+        clock.hour,
+        clock.minute,
       );
     }
 

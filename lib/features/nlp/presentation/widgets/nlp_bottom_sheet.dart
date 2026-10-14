@@ -6,7 +6,9 @@ import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
 
+import 'package:flow_sync/core/di/injection.dart';
 import 'package:flow_sync/features/family/presentation/bloc/family_bloc.dart';
+import 'package:flow_sync/features/nlp/data/services/ai_orchestration_service.dart';
 import 'package:flow_sync/features/nlp/presentation/bloc/nlp_input_bloc.dart';
 import 'package:flow_sync/features/nlp/presentation/bloc/nlp_input_event.dart';
 import 'package:flow_sync/features/nlp/presentation/bloc/nlp_input_state.dart';
@@ -143,6 +145,8 @@ class _NlpBottomSheetState extends State<NlpBottomSheet>
                         },
                       ),
                       const Spacer(),
+                      const _LlamaModeToggleChip(),
+                      const SizedBox(width: 4),
                       IconButton(
                         icon: Icon(
                           Icons.close,
@@ -571,6 +575,101 @@ class _SlideUpFadeInState extends State<_SlideUpFadeIn>
       child: SlideTransition(
         position: _slide,
         child: widget.child,
+      ),
+    );
+  }
+}
+
+class _LlamaModeToggleChip extends StatefulWidget {
+  const _LlamaModeToggleChip();
+
+  @override
+  State<_LlamaModeToggleChip> createState() => _LlamaModeToggleChipState();
+}
+
+class _LlamaModeToggleChipState extends State<_LlamaModeToggleChip> {
+  @override
+  Widget build(BuildContext context) {
+    if (!getIt.isRegistered<AiOrchestrationService>()) {
+      return const SizedBox.shrink();
+    }
+    final aiService = getIt<AiOrchestrationService>();
+    final colorScheme = Theme.of(context).colorScheme;
+
+    final String label;
+    final IconData icon;
+    final Color tint;
+
+    if (!aiService.enableLocalLlama) {
+      label = '☁️ Cloud 전용';
+      icon = Icons.cloud_outlined;
+      tint = Colors.blueGrey;
+    } else if (aiService.waitDraftUnlimited) {
+      label = '🦙 Llama 무제한';
+      icon = Icons.bolt;
+      tint = Colors.teal;
+    } else {
+      label = '🦙 Llama 1.5s';
+      icon = Icons.timer_outlined;
+      tint = Colors.amber;
+    }
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(20),
+      onTap: () {
+        setState(() {
+          if (!aiService.enableLocalLlama) {
+            // Cloud 전용 -> Llama 무제한 대기
+            aiService.enableLocalLlama = true;
+            aiService.waitDraftUnlimited = true;
+          } else if (aiService.waitDraftUnlimited) {
+            // Llama 무제한 -> Llama 1.5s 예산
+            aiService.waitDraftUnlimited = false;
+          } else {
+            // Llama 1.5s 예산 -> Cloud 전용
+            aiService.enableLocalLlama = false;
+          }
+        });
+        ScaffoldMessenger.of(context)
+          ..removeCurrentSnackBar()
+          ..showSnackBar(
+            SnackBar(
+              content: Text(
+                !aiService.enableLocalLlama
+                    ? '☁️ 순수 Cloud 모드 (로컬 Llama 비활성화)'
+                    : aiService.waitDraftUnlimited
+                        ? '🦙 Llama 초안 무제한 대기 모드 (타임아웃 없음)'
+                        : '🦙 Llama 초안 예산 모드 (1.5초 초과 시 생략)',
+              ),
+              duration: const Duration(seconds: 2),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          color: tint.withValues(alpha: 0.15),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: tint.withValues(alpha: 0.35),
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 14, color: tint),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: colorScheme.onSurface,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

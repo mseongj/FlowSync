@@ -131,7 +131,8 @@ void main() {
         expect(third.intent, 'CREATE_EVENT');
         expect(third.eventTitleTokenized, '미팅');
         expect(third.startTime, isNotNull);
-        expect(third.startTime!.hour, 3);
+        // 시간대 표기가 없는 "3시"는 일정 특성상 오후(15시)로 해석
+        expect(third.startTime!.hour, 15);
 
         verifyNever(
           () => mockFunctions.invoke(

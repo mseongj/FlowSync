@@ -241,6 +241,94 @@ void main() {
     });
   });
 
+  group('Local time parser', () {
+    ({int hour, int minute})? p(String s) =>
+        AiOrchestrationService.parseClockTime(s);
+
+    test('bare Korean hour: 1~6 → PM, 7~11 → AM, 12 → noon', () {
+      expect(p('내일 3시 팀 미팅')?.hour, 15);
+      expect(p('내일 7시 미팅')?.hour, 7);
+      expect(p('내일 11시 미팅')?.hour, 11);
+      expect(p('내일 12시 점심')?.hour, 12);
+      expect(p('내일 15시 미팅')?.hour, 15);
+    });
+
+    test('meridiem words override the heuristic', () {
+      expect(p('오전 3시 미팅')?.hour, 3);
+      expect(p('새벽 5시 출발')?.hour, 5);
+      expect(p('오후 3시 미팅')?.hour, 15);
+      expect(p('저녁 7시 식사')?.hour, 19);
+      expect(p('오전 12시')?.hour, 0);
+      expect(p('오후 12시')?.hour, 12);
+      expect(p('점심 1시')?.hour, 13);
+      expect(p('밤 12시')?.hour, 24);
+    });
+
+    test('minutes: 30분 and 반', () {
+      final a = p('오후 3시 30분 미팅');
+      expect((a?.hour, a?.minute), (15, 30));
+      final b = p('내일 3시반 미팅');
+      expect((b?.hour, b?.minute), (15, 30));
+    });
+
+    test('duration "3시간" is not a clock time', () {
+      expect(p('3시간 동안 회의'), isNull);
+      expect(p('3시간 회의 5시 시작')?.hour, 17);
+    });
+
+    test('rejects out-of-range hours and minutes', () {
+      expect(p('25시 미팅'), isNull);
+      expect(p('3시 75분'), isNull);
+    });
+
+    test('English times', () {
+      expect(p('meeting at 3pm')?.hour, 15);
+      expect(p('lunch 12 am')?.hour, 0);
+      final m = p('call 3:30 pm');
+      expect((m?.hour, m?.minute), (15, 30));
+      expect(p('meet at 3')?.hour, 15);
+      expect(p('meet at 9')?.hour, 9);
+    });
+
+    test('noon and midnight keywords', () {
+      expect(p('정오에 점심')?.hour, 12);
+      expect(p('자정에 만나')?.hour, 24);
+    });
+
+    test('day offsets', () {
+      expect(AiOrchestrationService.parseDayOffset('오늘 3시'), 0);
+      expect(AiOrchestrationService.parseDayOffset('내일 3시'), 1);
+      expect(AiOrchestrationService.parseDayOffset('모레 3시'), 2);
+      expect(AiOrchestrationService.parseDayOffset('글피 3시'), 3);
+      expect(AiOrchestrationService.parseDayOffset('day after tomorrow'), 2);
+      expect(AiOrchestrationService.parseDayOffset('tomorrow 3pm'), 1);
+      expect(AiOrchestrationService.parseDayOffset('3시 미팅'), 0);
+    });
+
+    test('offline fallback produces the correct date and time (모레 오후 3시 30분)', () async {
+      service.sseTransportOverride = (_) => Stream.error(Exception('offline'));
+
+      final chunks = await service
+          .processCommandStream(
+            service.tokenize('모레 오후 3시 30분 팀 미팅'),
+            enableEarlyExit: false,
+          )
+          .toList();
+
+      final start = (chunks.single as NlpFinalChunk).response.startTime!;
+      final expectedDay = DateTime.now().add(const Duration(days: 2));
+      expect(
+        (start.year, start.month, start.day, start.hour, start.minute),
+        (expectedDay.year, expectedDay.month, expectedDay.day, 15, 30),
+      );
+    });
+
+    test('Early-Exit recognizes 모레 as a date cue', () {
+      final cmd = service.tokenize('모레 오후 3시 30분 팀 미팅');
+      expect(service.canLocalEarlyExit(cmd), true);
+    });
+  });
+
   group('processCommandStream pipeline', () {
     // Gemini는 JSON을 조각으로 스트리밍한다 → 클라이언트는 aiReplyMessage만 보여야 함
     const sseLines = [
@@ -323,9 +411,11 @@ void main() {
     });
 
     test('skips draft when generation exceeds latency budget', () async {
+      service.waitDraftUnlimited = false;
+      service.draftBudget = const Duration(milliseconds: 50);
       when(() => mockLlama.isLoaded).thenReturn(true);
       when(() => mockLlama.generateDraft(any())).thenAnswer((_) async {
-        await Future<void>.delayed(const Duration(seconds: 2));
+        await Future<void>.delayed(const Duration(milliseconds: 200));
         return LlamaDraftResult(tokens: const [1], logprobs: const [-0.1]);
       });
       useTransport(() => Stream.fromIterable(sseLines));
@@ -334,6 +424,36 @@ void main() {
           .processCommandStream(service.tokenize('민지랑 언제 만날지 조율해줘'))
           .toList();
 
+      expect(sentBodies.single.containsKey('draftTokens'), isFalse);
+    });
+
+    test('attaches draft even after budget when waitDraftUnlimited is true', () async {
+      service.waitDraftUnlimited = true;
+      service.draftBudget = const Duration(milliseconds: 50);
+      when(() => mockLlama.isLoaded).thenReturn(true);
+      when(() => mockLlama.generateDraft(any())).thenAnswer((_) async {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        return LlamaDraftResult(tokens: const [99], logprobs: const [-0.2]);
+      });
+      useTransport(() => Stream.fromIterable(sseLines));
+
+      await service
+          .processCommandStream(service.tokenize('민지랑 언제 만날지 조율해줘'))
+          .toList();
+
+      expect(sentBodies.single['draftTokens'], [99]);
+    });
+
+    test('skips draft completely without calling Llama when enableLocalLlama is false', () async {
+      service.enableLocalLlama = false;
+      when(() => mockLlama.isLoaded).thenReturn(true);
+      useTransport(() => Stream.fromIterable(sseLines));
+
+      await service
+          .processCommandStream(service.tokenize('민지랑 언제 만날지 조율해줘'))
+          .toList();
+
+      verifyNever(() => mockLlama.generateDraft(any()));
       expect(sentBodies.single.containsKey('draftTokens'), isFalse);
     });
 

@@ -9,8 +9,8 @@ const corsHeaders = {
 }
 
 // ── Model Constants & Thresholds ──────────────────────────────────────────
-export const MODEL_FLASH_LITE = 'gemini-2.5-flash-lite'
-export const MODEL_FLASH = 'gemini-2.5-flash'
+export const MODEL_FLASH_LITE = 'gemini-flash-lite-latest'
+export const MODEL_FLASH = 'gemini-flash-latest'
 export const HARD_TIMEOUT_MS = 1200          // Max latency budget for primary 1st tier model
 export const COMPLEXITY_THRESHOLD = 40       // Complexity score threshold for pre-routing bypass
 export const QUALITY_SCORE_THRESHOLD = 0.75  // Response quality threshold for Flash-Lite acceptance
@@ -482,17 +482,23 @@ serve(async (req) => {
       }
     )
 
-    // JWT Validation - User must be logged in
-    const {
-      data: { user },
-      error: userError,
-    } = await supabaseClient.auth.getUser()
+    // JWT Validation - Authenticated user or Guest fallback
+    let user: any = null
+    try {
+      const authHeader = req.headers.get('Authorization')
+      if (authHeader && authHeader !== 'Bearer null' && authHeader !== 'Bearer undefined') {
+        const { data, error } = await supabaseClient.auth.getUser()
+        if (!error && data?.user) {
+          user = data.user
+          console.log(`[Auth] Authenticated user: ${user.id}`)
+        }
+      }
+    } catch (e) {
+      console.warn('[Auth] Token verification exception:', e)
+    }
 
-    if (userError || !user) {
-      return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        status: 401,
-      })
+    if (!user) {
+      console.log('[Auth] Guest / unauthenticated request -> proceeding with empty RAG context')
     }
 
     const { text, chatHistory, draftTokens, draftLogprobs } = await req.json()
@@ -514,7 +520,9 @@ serve(async (req) => {
     const isStreaming = url.searchParams.get('streaming') === 'true'
 
     // 1. RAG Context (Existing calendar events ±7d)
-    const { contextText, eventCount } = await fetchCalendarContext(supabaseClient, user.id)
+    const { contextText, eventCount } = user?.id
+      ? await fetchCalendarContext(supabaseClient, user.id)
+      : { contextText: '', eventCount: 0 }
     if (eventCount > 0) {
       console.log(`RAG context loaded: ${eventCount} events`)
     }
